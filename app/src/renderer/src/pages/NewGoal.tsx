@@ -309,14 +309,13 @@ export default function NewGoal(): JSX.Element {
             type="checkbox"
             checked={detailedPlanning}
             onChange={(e) => setDetailedPlanning(e.target.checked)}
-            disabled
             className="mt-0.5 h-4 w-4 rounded border-zinc-700 bg-bg-tertiary"
           />
           <span className="flex-1">
-            <span className="block font-medium text-zinc-500">詳細プランニング（Codex版では未対応）</span>
+            <span className="block font-medium">詳細プランニング</span>
             <span className="block text-xs text-zinc-500">
-              Codex版では turn-001 を読み取り専用の計画立案ターンとして実行します。
-              Claude版のような対話型プラン承認は後続対応です。
+              自走を開始する前に Codex と対話してプランを練り上げ、承認してから着手します。
+              プラン作成中は読み取り専用で実行されます。
             </span>
           </span>
         </label>

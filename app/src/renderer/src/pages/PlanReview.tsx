@@ -296,7 +296,7 @@ export default function PlanReview(): JSX.Element {
       <header className="shrink-0 border-b border-zinc-800 px-6 py-3">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-xs uppercase tracking-wide text-purple-400">
+            <div className="text-xs uppercase tracking-wide text-sky-400">
               対話型プランモード
             </div>
             <h1 className="text-base font-semibold text-zinc-100">
@@ -311,7 +311,7 @@ export default function PlanReview(): JSX.Element {
           </button>
         </div>
         <p className="mt-1 text-xs text-zinc-500">
-          Codex版の対話型プランモードは未対応です。通常ゴールでは turn-001 が読み取り専用で計画を作ります。
+          Codex と読み取り専用で対話し、プラン候補を承認すると自走を開始できます。
         </p>
       </header>
 
@@ -368,9 +368,9 @@ export default function PlanReview(): JSX.Element {
       </div>
 
       {pendingPlan && (
-        <div className="shrink-0 border-t border-purple-800/50 bg-purple-950/30 px-6 py-3">
+        <div className="shrink-0 border-t border-sky-800/50 bg-sky-950/30 px-6 py-3">
           <div className="mb-2 flex items-center justify-between">
-            <div className="text-xs font-semibold text-purple-300">
+            <div className="text-xs font-semibold text-sky-300">
               📋 プラン候補が提案されました
             </div>
             <button
@@ -381,7 +381,7 @@ export default function PlanReview(): JSX.Element {
               {approving ? '承認中…' : '✅ プラン承認'}
             </button>
           </div>
-          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-purple-900/50 bg-bg-secondary/60 p-2 text-xs text-zinc-200">
+          <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-sky-900/50 bg-bg-secondary/60 p-2 text-xs text-zinc-200">
             {pendingPlan}
           </pre>
         </div>
@@ -405,12 +405,12 @@ export default function PlanReview(): JSX.Element {
             }
             rows={3}
             disabled={sending || awaitingTurn || approving || crashedRecovery}
-            className="flex-1 resize-none rounded border border-zinc-700 bg-bg-secondary px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-purple-600 focus:outline-none disabled:opacity-50"
+            className="flex-1 resize-none rounded border border-zinc-700 bg-bg-secondary px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-accent focus:outline-none disabled:opacity-50"
           />
           <button
             onClick={() => void handleSend()}
             disabled={!canSend}
-            className="self-end rounded bg-purple-600 px-4 py-2 text-sm font-semibold text-white hover:bg-purple-500 disabled:opacity-50"
+            className="self-end rounded bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover disabled:opacity-50"
           >
             {sending ? '送信中…' : '送信'}
           </button>
