@@ -10,8 +10,8 @@ export default {
           tertiary: '#1c2128'
         },
         accent: {
-          DEFAULT: '#d97706',
-          hover: '#f59e0b'
+          DEFAULT: '#2f7cf6',
+          hover: '#4c92ff'
         }
       },
       fontFamily: {
