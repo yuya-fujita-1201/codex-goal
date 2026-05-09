@@ -208,7 +208,9 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   })
 
   ipcMain.handle(IPC.Plan.Approve, async (_evt, goalId: string, plan?: string) => {
-    return planSession.approve(goalId, plan)
+    const approvedPlan = await planSession.approve(goalId, plan)
+    runtime.startRunner(goalId)
+    return approvedPlan
   })
 
   ipcMain.handle(IPC.Plan.Abort, async (_evt, goalId: string) => {

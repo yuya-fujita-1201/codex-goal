@@ -258,15 +258,18 @@ export default function PlanReview(): JSX.Element {
     navigate('/')
   }
 
-  function handleStartWithoutPlan(): void {
+  async function handleStartWithoutPlan(): Promise<void> {
     if (!goalId) return
-    // After a crash the backend already reset status to 'pending', so the
-    // GoalDetail page can launch the runner via its existing "Start" button.
-    // Preserve ?ws= so the sidebar's active-ws highlight stays in sync.
-    const ws = goalRef.current?.state.workspace_path
-    navigate(
-      ws ? `/goals/${goalId}?ws=${encodeURIComponent(ws)}` : `/goals/${goalId}`
-    )
+    try {
+      await window.api.runner.start(goalId)
+      // Preserve ?ws= so the sidebar's active-ws highlight stays in sync.
+      const ws = goalRef.current?.state.workspace_path
+      navigate(
+        ws ? `/goals/${goalId}?ws=${encodeURIComponent(ws)}` : `/goals/${goalId}`
+      )
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err))
+    }
   }
 
   if (bootLoading) {
@@ -311,7 +314,7 @@ export default function PlanReview(): JSX.Element {
           </button>
         </div>
         <p className="mt-1 text-xs text-zinc-500">
-          Codex と読み取り専用で対話し、プラン候補を承認すると自走を開始できます。
+          Codex と読み取り専用で対話し、プラン候補を承認すると自走を開始します。
         </p>
       </header>
 
@@ -335,7 +338,7 @@ export default function PlanReview(): JSX.Element {
           </p>
           <div className="flex gap-2">
             <button
-              onClick={handleStartWithoutPlan}
+              onClick={() => void handleStartWithoutPlan()}
               className="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-500"
             >
               プランなしで開始
@@ -378,7 +381,7 @@ export default function PlanReview(): JSX.Element {
               disabled={approving}
               className="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50"
             >
-              {approving ? '承認中…' : '✅ プラン承認'}
+              {approving ? '承認中…' : '✅ 承認して開始'}
             </button>
           </div>
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-sky-900/50 bg-bg-secondary/60 p-2 text-xs text-zinc-200">
