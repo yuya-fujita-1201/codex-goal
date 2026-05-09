@@ -221,6 +221,7 @@ export const IPC = {
     // Phase 4.2 E1: edit objective.md / budget.json from the renderer.
     UpdateObjective: 'goal:update:objective',
     UpdateBudget: 'goal:update:budget',
+    MarkAchieved: 'goal:mark-achieved',
     // Phase 4.3: queue / list mid-flight user directives, or interrupt-and-restart.
     UserMessageAdd: 'goal:user-message:add',
     UserMessageList: 'goal:user-message:list',

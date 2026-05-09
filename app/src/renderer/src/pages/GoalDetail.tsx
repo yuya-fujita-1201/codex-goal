@@ -10,6 +10,7 @@ import type {
   UserMessage,
   WorkKind
 } from '@shared/types'
+import { canManuallyMarkAchieved } from '@shared/manualCompletion'
 import StatusBadge from '../components/StatusBadge'
 
 interface LogLine {
@@ -234,6 +235,19 @@ export default function GoalDetail(): JSX.Element {
     setRunning(true)
   }
 
+  async function onMarkAchieved(): Promise<void> {
+    if (!goalId) return
+    if (!confirm('この一時停止中のゴールを達成済みにします。よろしいですか？')) return
+    const updated = await window.api.goal.markAchieved(goalId)
+    if (!updated) {
+      setError('このゴールは現在、手動完了できる状態ではありません')
+      return
+    }
+    setGoal(updated)
+    setRunning(false)
+    setCurrentTurnId(null)
+  }
+
   async function onDelete(): Promise<void> {
     if (!goalId) return
     if (!confirm(`ゴール ${goalId} を削除します。よろしいですか？`)) return
@@ -293,6 +307,7 @@ export default function GoalDetail(): JSX.Element {
 
   const canPause = running && status === 'active'
   const canResume = !running && status === 'paused'
+  const canMarkAchieved = canManuallyMarkAchieved(status, running)
 
   // elapsed time — freeze at updated_at if the goal is in a terminal status
   const referenceTime =
@@ -384,6 +399,13 @@ export default function GoalDetail(): JSX.Element {
           className="rounded-md bg-sky-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-sky-600 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
           再開
+        </button>
+        <button
+          onClick={onMarkAchieved}
+          disabled={!canMarkAchieved}
+          className="rounded-md bg-blue-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-600 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+        >
+          完了にする
         </button>
         <button
           onClick={onAbort}

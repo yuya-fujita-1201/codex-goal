@@ -389,6 +389,20 @@ export async function deleteGoal(goalId: string): Promise<void> {
   await fs.rm(goalDir, { recursive: true, force: true })
 }
 
+export async function markAchieved(goalId: string): Promise<GoalSummary | null> {
+  const statePath = path.join(GOALS_ROOT, goalId, 'state.json')
+  const cur = await readJson<GoalState>(statePath)
+  if (!cur || cur.status !== 'paused') return null
+  const updated: GoalState = {
+    ...cur,
+    status: 'achieved',
+    next_resume_at: null,
+    updated_at: new Date().toISOString().replace(/\.\d+Z$/, 'Z')
+  }
+  await writeJson(statePath, updated)
+  return getGoal(goalId)
+}
+
 /**
  * Narrow status mutation used by callers outside the runner (e.g., planSession
  * approving or aborting a plan). Keeps the writeJson invariant in one place.

@@ -101,6 +101,23 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     }
   )
 
+  ipcMain.handle(IPC.Goal.MarkAchieved, async (_evt, goalId: string) => {
+    if (runtime.isRunning(goalId)) return null
+    const summary = await goalStore.markAchieved(goalId)
+    if (!summary) return null
+    runtime.cancelScheduledResume(goalId)
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        win.webContents.send(IPC.Events.GoalEvent, {
+          type: 'state',
+          goalId,
+          state: summary.state
+        })
+      }
+    }
+    return summary
+  })
+
   // ---- Phase 4.3: user-message queue ----
 
   ipcMain.handle(IPC.Goal.UserMessageList, async (_evt, goalId: string) => {

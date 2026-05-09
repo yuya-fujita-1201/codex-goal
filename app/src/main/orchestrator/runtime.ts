@@ -131,6 +131,10 @@ export function pauseRunner(goalId: string): boolean {
   return true
 }
 
+export function cancelScheduledResume(goalId: string): void {
+  clearResumeTimer(goalId)
+}
+
 export function resumeRunner(goalId: string): GoalRunner | null {
   // A manual or auto resume cancels any pending rate-limit timer.
   clearResumeTimer(goalId)

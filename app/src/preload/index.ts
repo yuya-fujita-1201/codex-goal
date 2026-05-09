@@ -47,6 +47,8 @@ const api = {
       ipcRenderer.invoke(IPC.Goal.UpdateObjective, goalId, objective),
     updateBudget: (goalId: string, budget: GoalBudget): Promise<GoalSummary | null> =>
       ipcRenderer.invoke(IPC.Goal.UpdateBudget, goalId, budget),
+    markAchieved: (goalId: string): Promise<GoalSummary | null> =>
+      ipcRenderer.invoke(IPC.Goal.MarkAchieved, goalId),
     // Phase 4.3: queue / list mid-flight directives, or interrupt-and-restart.
     userMessageList: (goalId: string): Promise<UserMessage[]> =>
       ipcRenderer.invoke(IPC.Goal.UserMessageList, goalId),
