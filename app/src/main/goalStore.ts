@@ -18,6 +18,7 @@ import type {
   UserMessage,
   WorkKind
 } from '@shared/types'
+import { DEFAULT_VERIFICATION_MODE, isVerificationMode } from '@shared/verification'
 import { terminateProcessTree } from './orchestrator/util'
 
 export const GOALS_ROOT = path.join(os.homedir(), '.codex-goals')
@@ -299,7 +300,10 @@ export async function createGoal(params: CreateGoalParams): Promise<GoalSummary>
     // false here so a missing/legacy CreateGoalParams.checker_required behaves
     // identically to pre-PR-D (judge-only path stays available). The NewGoal
     // form sets this to true by default for new goals.
-    checker_required: params.checker_required ?? false
+    checker_required: params.checker_required ?? false,
+    verification_mode: isVerificationMode(params.verification_mode)
+      ? params.verification_mode
+      : DEFAULT_VERIFICATION_MODE
   }
   await writeJson(path.join(goalDir, 'state.json'), state)
   await writeJson(path.join(goalDir, 'budget.json'), params.budget)

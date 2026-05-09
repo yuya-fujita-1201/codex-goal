@@ -35,6 +35,12 @@ export interface GoalState {
   // previous "judge worker can claim achieved without a checker" behavior).
   // New goals default to true via the NewGoal form.
   checker_required?: boolean
+  // Smart Verification defaults to 'smart': checker pass can finish the goal,
+  // checker miss/fail falls back to judge verification, and repeated rejected
+  // achievement claims stop as blocked instead of looping forever. 'strict'
+  // preserves the old hard-gate behavior; 'off' accepts worker achievement
+  // tokens without external verification.
+  verification_mode?: 'smart' | 'strict' | 'off'
 }
 
 export interface GoalBudget {
@@ -63,6 +69,7 @@ export interface CreateGoalParams {
   // passing. NewGoal form defaults to true; user can opt out for ad-hoc /
   // exploratory goals. Omitted = legacy behavior (judge-only path allowed).
   checker_required?: boolean
+  verification_mode?: 'smart' | 'strict' | 'off'
   // Plan mode integration: when 'planning', the goal is created without
   // auto-starting the runner; the renderer redirects to /plan/:goalId. Omit or
   // set to 'pending' to preserve the legacy "create then auto-run" flow.

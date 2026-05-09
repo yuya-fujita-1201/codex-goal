@@ -12,6 +12,11 @@ import { spawn } from 'node:child_process'
 
 import type { CheckerResult, GoalBudget, GoalEvent, GoalState, GoalStatus } from '@shared/types'
 import { isDefaultSampleCheckerTemplate } from '@shared/checkerTemplate'
+import {
+  decideAchievementVerification,
+  effectiveVerificationMode,
+  type CheckerRunOutcome
+} from '@shared/verification'
 
 import * as goalStore from '../goalStore'
 import {
@@ -57,8 +62,8 @@ const RATE_LIMIT_SLACK_MS = 5 * 60 * 1000
 const RATE_LIMIT_FALLBACK_PAUSE_MS = 60 * 60 * 1000 + RATE_LIMIT_SLACK_MS
 
 type StopReason = 'completed' | 'aborted'
-type HardCheckerOutcome = 'pass' | 'fail' | 'no_checker' | 'placeholder_checker'
-type HardCheckerRunResult = { outcome: HardCheckerOutcome; result: CheckerResult | null }
+type HardCheckerRunResult = { outcome: CheckerRunOutcome; result: CheckerResult | null }
+const MAX_CONSECUTIVE_VERIFICATION_REJECTIONS = 3
 
 const ANOMALY_RESULTS = new Set([
   'TIMEOUT',
@@ -100,6 +105,7 @@ export class GoalRunner extends EventEmitter {
   // C4: judge cooldown — skip judge for 3 turns after a not_yet verdict.
   private lastJudgeAtTurn = -Infinity
   private lastJudgeVerdict: 'achieved' | 'not_yet' | null = null
+  private consecutiveVerificationRejections = 0
   // PR-D: most recent structured checker output (parsed from <checker-result>
   // JSON). Forwarded into the next turn's prompt via {{CHECKER_RESULT}} so
   // the worker can see which milestones failed without re-running checker.
@@ -196,12 +202,16 @@ export class GoalRunner extends EventEmitter {
           return 'completed'
         }
 
+        const verificationMode = effectiveVerificationMode(state)
+
         // hard checker (before launching)
-        const checkerResult = await this.runHardChecker(state.workspace_path)
-        if (checkerResult.outcome === 'pass') {
-          await this.log('info', 'Hard checker PASSED — goal achieved')
-          await this.updateState({ status: 'achieved' })
-          return 'completed'
+        if (verificationMode !== 'off') {
+          const checkerResult = await this.runHardChecker(state.workspace_path)
+          if (checkerResult.outcome === 'pass') {
+            await this.log('info', 'Hard checker PASSED — goal achieved')
+            await this.updateState({ status: 'achieved' })
+            return 'completed'
+          }
         }
 
         if (state.turns >= budget.max_turns) {
@@ -479,60 +489,50 @@ export class GoalRunner extends EventEmitter {
         // soft achievement check
         if (hasGoalAchievedToken(stdout)) {
           await this.log('info', 'Worker emitted <goal-status>achieved</goal-status>')
-          const confirm = await this.runHardChecker(state.workspace_path)
-          if (confirm.outcome === 'pass') {
-            await this.log('info', 'Hard checker confirms achievement')
+          const latestState = (await this.readState()) ?? state
+          const mode = effectiveVerificationMode(latestState)
+          const confirm =
+            mode === 'off'
+              ? ({ outcome: 'no_checker', result: null } satisfies HardCheckerRunResult)
+              : await this.runHardChecker(state.workspace_path)
+          const firstDecision = decideAchievementVerification(mode, confirm.outcome)
+          if (firstDecision.action === 'achieved') {
+            await this.log('info', `Verification accepts achievement: ${firstDecision.reason}`)
             await this.updateState({ status: 'achieved' })
             return 'completed'
           }
-          if (confirm.outcome === 'no_checker' || confirm.outcome === 'placeholder_checker') {
-            // PR-D: when the goal opted into checker_required at creation,
-            // a missing checker.sh blocks 'achieved' even if the worker
-            // claims it. Refuses the judge-only path and continues looping
-            // so the operator can either install a checker or abandon.
-            if (state.checker_required === true && confirm.outcome === 'no_checker') {
-              await this.log(
-                'warn',
-                'Worker claims achieved but goal requires a checker.sh which is missing — refusing to mark achieved'
+          if (firstDecision.action === 'needs_judge') {
+            // C4: cooldown — if judge said not_yet within the last 3 turns, skip re-judging.
+            const turnsSinceJudge = turnNum - this.lastJudgeAtTurn
+            if (this.lastJudgeVerdict === 'not_yet' && turnsSinceJudge < 3) {
+              const stopped = await this.rejectAchievementClaim(
+                `Judge cooldown active after previous not_yet verdict (${turnsSinceJudge} turns ago)`
               )
+              if (stopped) return 'completed'
             } else {
-              if (confirm.outcome === 'placeholder_checker') {
-                await this.log(
-                  'warn',
-                  'Worker claims achieved but checker.sh is still the bundled sample — ignoring the placeholder and using judge verification'
-                )
-              }
-              // C4: cooldown — if judge said not_yet within the last 3 turns, skip re-judging.
-              const turnsSinceJudge = turnNum - this.lastJudgeAtTurn
-              if (this.lastJudgeVerdict === 'not_yet' && turnsSinceJudge < 3) {
+              // Phase 3: run judge worker for independent verification
+              const verdict = await this.runJudgeWorker(turnId, budget)
+              this.lastJudgeAtTurn = turnNum
+              this.lastJudgeVerdict =
+                verdict === 'achieved' || verdict === 'not_yet' ? verdict : null
+              const secondDecision = decideAchievementVerification(mode, confirm.outcome, verdict)
+              if (secondDecision.action === 'achieved') {
                 await this.log(
                   'info',
-                  `Judge cooldown active (last not_yet at turn ${this.lastJudgeAtTurn}, ${turnsSinceJudge} turns ago) — skipping judge`
+                  `Verification accepts achievement: ${secondDecision.reason}`
                 )
-              } else {
-                // Phase 3: run judge worker for independent verification
-                const verdict = await this.runJudgeWorker(turnId, budget)
-                this.lastJudgeAtTurn = turnNum
-                this.lastJudgeVerdict =
-                  verdict === 'achieved' || verdict === 'not_yet' ? verdict : null
-                if (verdict === 'achieved') {
-                  await this.log('info', 'Judge confirms achievement — marking achieved')
-                  await this.updateState({ status: 'achieved' })
-                  return 'completed'
-                }
-                if (verdict === 'not_yet') {
-                  await this.log('warn', 'Judge says not_yet — continuing')
-                } else {
-                  await this.log('warn', 'Judge produced no verdict — continuing')
-                }
+                await this.updateState({ status: 'achieved' })
+                return 'completed'
               }
+              const stopped = await this.rejectAchievementClaim(secondDecision.reason)
+              if (stopped) return 'completed'
             }
           } else {
-            await this.log(
-              'warn',
-              'Worker claims achieved but hard checker failed — continuing'
-            )
+            const stopped = await this.rejectAchievementClaim(firstDecision.reason)
+            if (stopped) return 'completed'
           }
+        } else {
+          this.consecutiveVerificationRejections = 0
         }
 
         // block summarizer every BLOCK_SIZE turns
@@ -904,7 +904,7 @@ export class GoalRunner extends EventEmitter {
         stderr += String(d)
       })
       const finalize = async (
-        outcome: Extract<HardCheckerOutcome, 'pass' | 'fail'>,
+        outcome: Extract<CheckerRunOutcome, 'pass' | 'fail'>,
         code: number | null,
         errMsg?: string
       ): Promise<void> => {
@@ -944,6 +944,23 @@ export class GoalRunner extends EventEmitter {
         void finalize('fail', null, String(err))
       })
     })
+  }
+
+  private async rejectAchievementClaim(reason: string): Promise<boolean> {
+    this.consecutiveVerificationRejections += 1
+    await this.log(
+      'warn',
+      `Achievement claim rejected by verification (${this.consecutiveVerificationRejections}/${MAX_CONSECUTIVE_VERIFICATION_REJECTIONS}): ${reason}`
+    )
+    if (this.consecutiveVerificationRejections >= MAX_CONSECUTIVE_VERIFICATION_REJECTIONS) {
+      await this.log(
+        'error',
+        'Too many consecutive rejected achievement claims — marking blocked to avoid an endless verification loop'
+      )
+      await this.updateState({ status: 'blocked' })
+      return true
+    }
+    return false
   }
 
   // Generate HANDOFF.md so a follow-up goal can pick up where this one stopped.

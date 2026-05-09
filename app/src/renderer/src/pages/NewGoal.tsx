@@ -6,6 +6,7 @@ import {
   SAMPLE_CHECKER_TEMPLATE,
   isDefaultSampleCheckerTemplate
 } from '@shared/checkerTemplate'
+import type { VerificationMode } from '@shared/verification'
 
 const FALLBACK_BUDGET: GoalBudget = {
   max_turns: 300,
@@ -41,12 +42,9 @@ export default function NewGoal(): JSX.Element {
     Math.round(FALLBACK_BUDGET.max_wall_time_seconds / 60)
   )
   const [budgetDefaults, setBudgetDefaults] = useState<GoalBudget>(FALLBACK_BUDGET)
+  const [verificationMode, setVerificationMode] = useState<VerificationMode>('smart')
   const [checkerEnabled, setCheckerEnabled] = useState(false)
   const [checkerScript, setCheckerScript] = useState(SAMPLE_CHECKER_TEMPLATE)
-  // When true, the runner refuses 'achieved' unless checker.sh passes.
-  // This is intentionally opt-in because many goals are docs/research tasks
-  // whose completion cannot be measured by the bundled code-build sample.
-  const [checkerRequired, setCheckerRequired] = useState(false)
   const [detailedPlanning, setDetailedPlanning] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -132,6 +130,12 @@ export default function NewGoal(): JSX.Element {
       )
       return
     }
+    if (verificationMode === 'strict' && !checkerEnabled) {
+      setError(
+        'Strict verification では checker.sh が必須です。checker を設定するか Smart verification を選んでください'
+      )
+      return
+    }
     setSubmitting(true)
     setError(null)
     try {
@@ -146,10 +150,8 @@ export default function NewGoal(): JSX.Element {
           max_wall_time_seconds: maxWallTimeMin * 60
         },
         checker_script: checkerEnabled ? checkerScript : null,
-        // PR-D: only require the checker if the user actually provided one.
-        // checkerEnabled=false implies checker_required=false (any other
-        // combination would be unsatisfiable).
-        checker_required: checkerEnabled && checkerRequired,
+        checker_required: verificationMode === 'strict',
+        verification_mode: verificationMode,
         initial_status: detailedPlanning ? 'planning' : undefined
       }
       const created = await window.api.goal.create(payload)
@@ -344,13 +346,44 @@ export default function NewGoal(): JSX.Element {
 
               <div>
                 <div className="mb-2 text-xs font-medium uppercase tracking-wider text-zinc-400">
-                  Hard checker（任意）
+                  Smart Verification（デフォルト ON）
                 </div>
                 <p className="mb-3 text-xs text-zinc-500">
-                  毎ターン後にこのスクリプトをワークスペースで実行し、exit 0 を返したら
-                  「達成」状態へ自動遷移します。ビルド、テスト、生成物の存在確認など、
-                  このゴール専用の機械判定が書ける場合だけ設定してください。
+                  checker と judge worker を組み合わせて達成判定します。Smart では
+                  checker が不一致でも judge が成果物を確認できれば完了でき、同じ否認が続く場合は
+                  ブロックで停止します。
                 </p>
+                <div className="mb-4 grid gap-2 sm:grid-cols-3">
+                  {[
+                    ['smart', 'Smart', '通常はこちら。品質確認しつつ詰まりにくい'],
+                    ['strict', 'Strict', 'CI や build など明確な checker がある時'],
+                    ['off', 'Off', '外部検証を使わず worker の達成申告を採用']
+                  ].map(([value, label, help]) => (
+                    <label
+                      key={value}
+                      className={`rounded-md border px-3 py-2 text-sm transition ${
+                        verificationMode === value
+                          ? 'border-accent bg-accent/10 text-zinc-100'
+                          : 'border-zinc-800 bg-bg-tertiary text-zinc-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="verificationMode"
+                          value={value}
+                          checked={verificationMode === value}
+                          onChange={() => setVerificationMode(value as VerificationMode)}
+                        />
+                        <span className="font-medium">{label}</span>
+                      </div>
+                      <div className="mt-1 text-xs text-zinc-500">{help}</div>
+                    </label>
+                  ))}
+                </div>
+                <div className="mb-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
+                  Optional checker.sh
+                </div>
                 <label className="mb-2 flex items-center gap-2 text-sm text-zinc-300">
                   <input
                     type="checkbox"
@@ -369,19 +402,9 @@ export default function NewGoal(): JSX.Element {
                       className="w-full rounded-md border border-zinc-800 bg-bg-tertiary px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-accent"
                       spellCheck={false}
                     />
-                    <label className="mt-3 flex items-center gap-2 text-sm text-zinc-300">
-                      <input
-                        type="checkbox"
-                        checked={checkerRequired}
-                        onChange={(e) => setCheckerRequired(e.target.checked)}
-                        className="h-4 w-4 rounded border-zinc-700 bg-bg-tertiary"
-                      />
-                      checker.sh の合格を必須にする
-                    </label>
                     <p className="mt-1 text-xs text-zinc-500">
-                      ON の場合、worker が <code>&lt;goal-status&gt;achieved&lt;/goal-status&gt;</code>{' '}
-                      を出しても、このスクリプトが exit 0 を返さない限り達成扱いになりません。
-                      OFF の場合は judge worker による独立判定（旧来の動作）でも達成可能。
+                      Strict では checker.sh の exit 0 が必須です。Smart では checker を強い品質シグナルとして扱い、
+                      失敗時は judge worker が成果物・ログ・digest を見て独立判定します。
                     </p>
                   </>
                 )}
