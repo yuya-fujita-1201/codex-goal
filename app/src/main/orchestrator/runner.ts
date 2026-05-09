@@ -11,6 +11,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 
 import type { CheckerResult, GoalBudget, GoalEvent, GoalState, GoalStatus } from '@shared/types'
+import { isDefaultSampleCheckerTemplate } from '@shared/checkerTemplate'
 
 import * as goalStore from '../goalStore'
 import {
@@ -56,6 +57,8 @@ const RATE_LIMIT_SLACK_MS = 5 * 60 * 1000
 const RATE_LIMIT_FALLBACK_PAUSE_MS = 60 * 60 * 1000 + RATE_LIMIT_SLACK_MS
 
 type StopReason = 'completed' | 'aborted'
+type HardCheckerOutcome = 'pass' | 'fail' | 'no_checker' | 'placeholder_checker'
+type HardCheckerRunResult = { outcome: HardCheckerOutcome; result: CheckerResult | null }
 
 const ANOMALY_RESULTS = new Set([
   'TIMEOUT',
@@ -482,17 +485,23 @@ export class GoalRunner extends EventEmitter {
             await this.updateState({ status: 'achieved' })
             return 'completed'
           }
-          if (confirm.outcome === 'no_checker') {
+          if (confirm.outcome === 'no_checker' || confirm.outcome === 'placeholder_checker') {
             // PR-D: when the goal opted into checker_required at creation,
             // a missing checker.sh blocks 'achieved' even if the worker
             // claims it. Refuses the judge-only path and continues looping
             // so the operator can either install a checker or abandon.
-            if (state.checker_required === true) {
+            if (state.checker_required === true && confirm.outcome === 'no_checker') {
               await this.log(
                 'warn',
                 'Worker claims achieved but goal requires a checker.sh which is missing — refusing to mark achieved'
               )
             } else {
+              if (confirm.outcome === 'placeholder_checker') {
+                await this.log(
+                  'warn',
+                  'Worker claims achieved but checker.sh is still the bundled sample — ignoring the placeholder and using judge verification'
+                )
+              }
               // C4: cooldown — if judge said not_yet within the last 3 turns, skip re-judging.
               const turnsSinceJudge = turnNum - this.lastJudgeAtTurn
               if (this.lastJudgeVerdict === 'not_yet' && turnsSinceJudge < 3) {
@@ -865,10 +874,19 @@ export class GoalRunner extends EventEmitter {
    */
   private async runHardChecker(
     workspacePath: string
-  ): Promise<{ outcome: 'pass' | 'fail' | 'no_checker'; result: CheckerResult | null }> {
+  ): Promise<HardCheckerRunResult> {
     const checker = path.join(goalDir(this.goalId), 'checker.sh')
     if (!existsSync(checker)) {
       return { outcome: 'no_checker', result: null }
+    }
+    const checkerSource = await fs.readFile(checker, 'utf8').catch(() => '')
+    if (checkerSource && isDefaultSampleCheckerTemplate(checkerSource)) {
+      this.lastCheckerResult = null
+      await this.log(
+        'warn',
+        'checker.sh is the bundled sample template, so it is ignored. Customize it for this goal before making it authoritative.'
+      )
+      return { outcome: 'placeholder_checker', result: null }
     }
     const checkerLog = path.join(goalDir(this.goalId), 'logs', 'checker.log')
     const startedAt = isoNow()
@@ -886,7 +904,7 @@ export class GoalRunner extends EventEmitter {
         stderr += String(d)
       })
       const finalize = async (
-        outcome: 'pass' | 'fail',
+        outcome: Extract<HardCheckerOutcome, 'pass' | 'fail'>,
         code: number | null,
         errMsg?: string
       ): Promise<void> => {

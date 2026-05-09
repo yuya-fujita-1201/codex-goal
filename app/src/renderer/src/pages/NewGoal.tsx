@@ -2,6 +2,10 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import type { CreateGoalParams, GoalBudget, RecentWorkspace } from '@shared/types'
+import {
+  SAMPLE_CHECKER_TEMPLATE,
+  isDefaultSampleCheckerTemplate
+} from '@shared/checkerTemplate'
 
 const FALLBACK_BUDGET: GoalBudget = {
   max_turns: 300,
@@ -10,48 +14,6 @@ const FALLBACK_BUDGET: GoalBudget = {
   heartbeat_threshold_seconds: 120,
   rate_limit_sleep_seconds: 5
 }
-
-const SAMPLE_CHECKER = `#!/usr/bin/env bash
-# Hard checker — runs from cwd = workspace before each turn.
-# Contract:
-#   - exit 0   ⇒ goal achieved
-#   - exit !=0 ⇒ not yet
-#   - the optional <checker-result> JSON below lets the runner inject
-#     per-milestone failure detail into the next turn's prompt.
-#
-# Side-effect-free, idempotent, fast (<5s) — this runs every turn.
-
-# --- milestone checks (replace with your actual goal criteria) -----------
-check_m1() { test -f dist/build.js; }              # M1: build artifact exists
-check_m2() { npm test --silent >/dev/null 2>&1; }  # M2: tests pass
-# check_m3() { curl -fsS http://localhost:3000/health >/dev/null; }
-
-# --- execute and collect results -----------------------------------------
-declare -a milestones
-overall=0
-add() { local id="$1" label="$2" fn="$3"
-  if "$fn" 2>/dev/null; then
-    milestones+=("{\\"id\\":\\"$id\\",\\"label\\":\\"$label\\",\\"status\\":\\"pass\\"}")
-  else
-    milestones+=("{\\"id\\":\\"$id\\",\\"label\\":\\"$label\\",\\"status\\":\\"fail\\"}")
-    overall=1
-  fi
-}
-add M1 "build artifact exists" check_m1
-add M2 "tests pass" check_m2
-# add M3 "health endpoint OK" check_m3
-
-passed=$(printf '%s\\n' "\${milestones[@]}" | grep -c '"pass"' || true)
-total=\${#milestones[@]}
-
-# --- emit structured result (PR-D: optional, parsed by runner) -----------
-cat <<EOF
-<checker-result>
-{"schema_version":1,"milestones":[$(IFS=,; echo "\${milestones[*]}")],"evidence":"$passed/$total milestones passed","passed_count":$passed,"total_count":$total}
-</checker-result>
-EOF
-exit "$overall"
-`
 
 function basename(p: string): string {
   if (!p) return ''
@@ -79,12 +41,12 @@ export default function NewGoal(): JSX.Element {
     Math.round(FALLBACK_BUDGET.max_wall_time_seconds / 60)
   )
   const [budgetDefaults, setBudgetDefaults] = useState<GoalBudget>(FALLBACK_BUDGET)
-  const [checkerEnabled, setCheckerEnabled] = useState(true)
-  const [checkerScript, setCheckerScript] = useState(SAMPLE_CHECKER)
-  // PR-D: when true, the runner refuses 'achieved' without a checker.sh
-  // pass. Pairs with checkerEnabled — disabling the checker also disables
-  // this gate (otherwise the goal would be unsatisfiable).
-  const [checkerRequired, setCheckerRequired] = useState(true)
+  const [checkerEnabled, setCheckerEnabled] = useState(false)
+  const [checkerScript, setCheckerScript] = useState(SAMPLE_CHECKER_TEMPLATE)
+  // When true, the runner refuses 'achieved' unless checker.sh passes.
+  // This is intentionally opt-in because many goals are docs/research tasks
+  // whose completion cannot be measured by the bundled code-build sample.
+  const [checkerRequired, setCheckerRequired] = useState(false)
   const [detailedPlanning, setDetailedPlanning] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -158,9 +120,15 @@ export default function NewGoal(): JSX.Element {
       setError('ゴールを入力してください')
       return
     }
-    if (checkerEnabled && checkerRequired && checkerScript.trim().length === 0) {
+    if (checkerEnabled && checkerScript.trim().length === 0) {
       setError(
-        'checker.sh が必須に設定されていますが、スクリプトが空です。スクリプトを書くか、必須化を外してください'
+        'checker.sh が有効ですが、スクリプトが空です。スクリプトを書くか、checker を OFF にしてください'
+      )
+      return
+    }
+    if (checkerEnabled && isDefaultSampleCheckerTemplate(checkerScript)) {
+      setError(
+        'checker.sh がサンプルのままです。このゴール専用の達成条件に書き換えるか、checker を OFF にしてください'
       )
       return
     }
@@ -376,13 +344,12 @@ export default function NewGoal(): JSX.Element {
 
               <div>
                 <div className="mb-2 text-xs font-medium uppercase tracking-wider text-zinc-400">
-                  Hard checker（推奨）
+                  Hard checker（任意）
                 </div>
                 <p className="mb-3 text-xs text-zinc-500">
                   毎ターン後にこのスクリプトをワークスペースで実行し、exit 0 を返したら
-                  「達成」状態へ自動遷移します。digest はあなた自身の自己申告なので、
-                  外部観測コマンド（curl / test -f / npm test 等）で機械判定するこのスクリプトが
-                  自己採点バイアスへの最大の防壁です。
+                  「達成」状態へ自動遷移します。ビルド、テスト、生成物の存在確認など、
+                  このゴール専用の機械判定が書ける場合だけ設定してください。
                 </p>
                 <label className="mb-2 flex items-center gap-2 text-sm text-zinc-300">
                   <input
@@ -409,7 +376,7 @@ export default function NewGoal(): JSX.Element {
                         onChange={(e) => setCheckerRequired(e.target.checked)}
                         className="h-4 w-4 rounded border-zinc-700 bg-bg-tertiary"
                       />
-                      checker.sh の合格を必須にする（推奨）
+                      checker.sh の合格を必須にする
                     </label>
                     <p className="mt-1 text-xs text-zinc-500">
                       ON の場合、worker が <code>&lt;goal-status&gt;achieved&lt;/goal-status&gt;</code>{' '}
