@@ -1,5 +1,6 @@
 import { app, shell, BrowserWindow } from 'electron'
 import path from 'node:path'
+import { existsSync } from 'node:fs'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
 import { registerIpcHandlers } from './ipc'
@@ -7,7 +8,16 @@ import { markOrphanedActiveAsPaused } from './goalStore'
 
 let mainWindow: BrowserWindow | null = null
 
+function appIconPath(): string | undefined {
+  const candidates = [
+    path.join(app.getAppPath(), 'build', 'icon.png'),
+    path.join(process.resourcesPath, 'build', 'icon.png')
+  ]
+  return candidates.find((p) => existsSync(p))
+}
+
 function createWindow(): void {
+  const icon = appIconPath()
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -16,6 +26,7 @@ function createWindow(): void {
     show: false,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0e1116',
+    ...(icon ? { icon } : {}),
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -46,6 +57,10 @@ function createWindow(): void {
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.marumiworks.codex-goal')
+  const icon = appIconPath()
+  if (process.platform === 'darwin' && icon) {
+    app.dock.setIcon(icon)
+  }
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
