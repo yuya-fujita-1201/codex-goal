@@ -86,6 +86,11 @@ export async function detectCodexBin(): Promise<string | null> {
   } else {
     candidates.push(
       path.join(home, '.codex', 'local', 'codex'),
+      // 公式ネイティブインストーラ (codex を ~/.local/bin に置くパッケージ) の
+      // デフォルト配置。Electron が Finder/Dock 起動だと launchd の PATH に
+      // ~/.local/bin が入らず PATH フォールバックも空振りするため、ここで
+      // 明示的に拾う。
+      path.join(home, '.local', 'bin', 'codex'),
       '/opt/homebrew/bin/codex',
       '/usr/local/bin/codex'
     )
