@@ -36,6 +36,12 @@ interface BuildPromptArgs {
   // the critic accepted achievement. Injected via {{CRITIC_FLAGS}} so the
   // worker can address each specific gap.
   lastCriticFlags?: string[]
+  // Block-judge: 直近のブロック境界レビュー（10ターン毎）で外部 worker から
+  // 受け取ったアドバイザリー note。should_stop / goal_drift と判定された場合に
+  // 限り、verdict と理由を整形した文字列が入る。継続判定（continue）のときは
+  // 空文字 / 未設定。次ターンの prompt 最上段に注入してメイン worker に
+  // 再確認させる。強制ではなく advisory（worker が棄却可能）。
+  reviewerNote?: string
 }
 
 // Phase 4.3: render queued user directives as the highest-priority section.
@@ -98,7 +104,7 @@ const FALLBACK_MAX_CONSECUTIVE = 3
 
 // turn-001 banner: forces the worker into plan-only mode. Reused for any
 // future "first turn" reset. Kept here so tests can assert on it.
-function buildPlanBanner(): string {
+function buildPlanBanner(workspacePath: string): string {
   return [
     '## 🧭 計画立案ターン（最重要・実装ターンの規律より優先）',
     '',
@@ -112,6 +118,7 @@ function buildPlanBanner(): string {
     '3. ワークスペースの構造、既存コード、関連ドキュメント、`memo.md` 等の入力資料を必要なだけ調査してよい。',
     '4. 調査結果に基づき、ゴール達成までの **計画** を立てる。後続ターンが「次の最小ステップを1つずつ」消化していけるレベルで分解すること。',
     '5. **`<goal-status>achieved</goal-status>` を絶対に出力しない。** 計画立案だけではゴール達成ではない。',
+    `6. **成果物の配置先はワークスペース \`${workspacePath}\` 配下に限る**。plan 内でディレクトリ構成・ファイルパスを示す場合は、**必ずこのワークスペース配下の相対パス、もしくはこのワークスペースを起点とする絶対パス**で書くこと。他プロジェクトの \`docs/\` や別 repo を成果物の保存先として指定してはいけない。オブジェクト文中に他プロジェクト名が登場していても、それは「文脈情報」であって「保存先指定」ではない。`,
     '',
     '### 出力フォーマット（必須）',
     '',
@@ -217,6 +224,7 @@ export async function buildPrompt(args: BuildPromptArgs): Promise<string> {
     '{{DIGEST}}': digest.trim(),
     '{{BLOCKS}}': blocks.trim() || '（まだ block summary はありません）',
     '{{PLAN}}': planSection,
+    '{{WORKSPACE_PATH}}': args.state.workspace_path,
     '{{TURNS_USED}}': String(args.turnNum),
     '{{MAX_TURNS}}': String(args.budget.max_turns),
     '{{ELAPSED_MIN}}': String(elapsedMin),
@@ -234,17 +242,44 @@ export async function buildPrompt(args: BuildPromptArgs): Promise<string> {
   // turn-001 only: prepend the plan banner so the worker stays read-only and
   // emits a <plan> tag instead of starting implementation.
   if (args.turnNum === 1) {
-    out = buildPlanBanner() + '\n' + out
+    out = buildPlanBanner(args.state.workspace_path) + '\n' + out
   }
   if (args.consecutiveAnomalies && args.consecutiveAnomalies > 0) {
     out = buildFallbackBanner(args.consecutiveAnomalies) + '\n' + out
   }
-  // Phase 4.3: user messages take absolute priority — prepend AFTER the
-  // fallback banner so they sit at the very top of the prompt.
+  // Block-judge advisory note: 外部 worker からの「終わってもいいのでは / ゴール
+  // が逸れている」フィードバックを上段に注入。これは advisory（強制ではない）
+  // なので、ユーザーからの追加指示（最優先）よりは下、それ以外の本文より上、
+  // という位置に置く。先に reviewer-note を積み、その後で user-messages を
+  // 積むことで、最終的な並びは「user-messages → reviewer-note → 本文」になる。
+  if (args.reviewerNote && args.reviewerNote.trim().length > 0) {
+    out = buildReviewerNoteSection(args.reviewerNote) + '\n' + out
+  }
+  // Phase 4.3: user messages take absolute priority — prepend last so they
+  // sit at the very top of the prompt, above the reviewer note (advisory).
   if (args.userMessages && args.userMessages.length > 0) {
     out = buildUserMessagesSection(args.userMessages) + '\n' + out
   }
   return out
+}
+
+// 外部レビュアー（block-judge worker）からのアドバイザリー note を整形する。
+// 強制ではないが「最優先で読め」と伝える。本文は runner 側で組み立てた文字列を
+// そのまま埋め込む。
+function buildReviewerNoteSection(note: string): string {
+  const lines: string[] = [
+    '## 🔍 外部レビュアーからの注意（最優先で確認）',
+    '',
+    '直近のブロック境界（10ターン毎）で別系統モデルが現状をレビューしました。',
+    '以下の指摘を**最優先で読んで**、ゴール完了済みか・方向が逸れていないかを再評価してください。',
+    '指摘に同意できるなら、ターン冒頭でその旨を述べてから完了処理（<goal-status>achieved</goal-status>）',
+    'またはプラン修正に着手すること。同意できない場合も、理由を**1〜2文で digest に残してから**',
+    '通常タスクに戻ること。',
+    '',
+    note.trim(),
+    ''
+  ]
+  return lines.join('\n')
 }
 
 // Exported for unit tests so the helpers can be asserted without constructing
@@ -252,7 +287,7 @@ export async function buildPrompt(args: BuildPromptArgs): Promise<string> {
 export const __test = { buildFallbackBanner, buildUserMessagesSection, buildPlanBanner }
 
 /**
- * Sentinel emitted by Codex *immediately after* `</digest-update>` so we can
+ * Sentinel emitted by Claude *immediately after* `</digest-update>` so we can
  * disambiguate the real terminal block from any partial / quoted occurrence
  * earlier in the turn (e.g. tool output that echoes the tag, or a worker that
  * crashed mid-stream and re-tried). Combined with last-match scanning, this
@@ -511,6 +546,9 @@ export function extractBlockSummary(stdout: string): string | null {
 interface BuildJudgePromptArgs {
   goalId: string
   triggerTurnId: string
+  // critic_model が Codex 系のとき true。プロンプト内の「実行環境の制約」セクションを
+  // Claude / Codex のどちらの security boundary で動いているかに応じて分岐させる。
+  useClaude: boolean
 }
 
 const JUDGE_PROMPT_TEMPLATE = `# Critic / Judge Worker (independent skeptic)
@@ -523,12 +561,48 @@ const JUDGE_PROMPT_TEMPLATE = `# Critic / Judge Worker (independent skeptic)
 ファイルがあるが中身が壊れている・エラーログが残っている等のいずれかが見つかれば、
 それを <critic-flags> として列挙し、verdict は **not_yet** を返してください。
 
+特に **plan.md のマイルストーン未完** は最重要の flag 対象です。下記「立案済み計画」の
+各マイルストーンに対し、達成証拠（ファイル・コード内容・既存ログ等）が cwd 内に
+実在するか **1 件ずつ確認**してください。未完／未確認のマイルストーンが 1 つでもあれば
+verdict は not_yet とし、critic-flags にその M番号を明記すること。
+
 完全に確信できる場合（証拠を 1 件以上自分で確認した上で）にのみ、空の <critic-flags></critic-flags>
 と <judge-verdict>achieved</judge-verdict> を返すこと。
+
+## 判定対象外（独立検証不能な領域）
+
+以下は判定 worker の cwd 内ファイル読み取りだけでは原理的に確認できない。
+**「未検証だから」を理由に not_yet にしてはいけない**。失敗の積極的証拠（エラーログ・
+壊れたファイル・落ちたテスト出力など）が cwd 内に**実際にある**場合に限り flag を上げてよい:
+
+- 実機・実環境での動作確認（実デバイス・iOS シミュレータの起動結果・スピーカー音量など）
+- GUI 目視・スクリーンショット主観評価・人間の感覚評価
+- 外部サービスの DOM セレクタ実動作（note.com・SaaS の UI 操作など）
+- 型チェック0件・lint 0件など、worker が自分でコマンドを走らせて初めてわかる結果
+  （ただし digest や trigger turn の stdout に既存の \`tsc\` / \`eslint\` 実行結果が
+  残っていればそれは判定材料として使ってよい）
+- ゴールが「ユーザー指示により延期/対象外」と明記している項目
+
+判定は次の2軸で行うこと:
+- (a) 失敗の積極的証拠（エラー・欠落・壊れ）
+- (b) 成功の積極的証拠（ファイル実在・コード内容・既存実行ログ等）
+
+「証拠がない」「自分で実行確認していない」は (a) と同じ扱いにせず、(b) の**不足**としてのみ
+扱うこと。\`objective.md\` に「**判定対象外**」セクションがある場合はそれを最優先で尊重する。
 
 ## ゴール
 
 {{OBJECTIVE}}
+
+## 立案済み計画 (plan.md)
+
+人間が承認した（または turn-001 で確定した）達成までの設計図です。
+**plan のマイルストーンが全て完了していなければ、原則として achieved を出してはいけません**。
+未完マイルストーンを見つけたら critic-flags にその M番号と未完の根拠を必ず 1 行入れること。
+plan.md が「（plan.md なし）」の場合は本セクションを判定材料から除外し、objective と
+digest のみで判定する。
+
+{{PLAN}}
 
 ## 実装エージェントが提出した digest（自己報告）
 
@@ -540,8 +614,10 @@ const JUDGE_PROMPT_TEMPLATE = `# Critic / Judge Worker (independent skeptic)
 
 ## ワークスペース内の証拠を自分で確認してよい
 
-cwd はワークスペースに固定されている。必要なら ls / cat / git log / cat <file> などで現状を確認すること。
-ただし新たな実装は行わず、**判定のための読み取りのみ**に留めること。
+cwd はワークスペースに固定されている。判定のための **読み取り** はしてよい（**新規実装や
+ファイル編集は一切行わない**）。
+
+{{ENV_NOTE}}
 
 ## 出力フォーマット（必須）
 
@@ -567,6 +643,7 @@ export async function buildJudgePrompt(args: BuildJudgePromptArgs): Promise<stri
   const dir = goalDir(args.goalId)
   const objective = await fs.readFile(path.join(dir, 'objective.md'), 'utf8').catch(() => '')
   const digest = await fs.readFile(path.join(dir, 'digest.md'), 'utf8').catch(() => '')
+  const plan = await fs.readFile(path.join(dir, 'plan.md'), 'utf8').catch(() => '')
   const triggerStdoutPath = path.join(dir, 'turns', `${args.triggerTurnId}.stdout`)
   const triggerRaw = await fs.readFile(triggerStdoutPath, 'utf8').catch(() => '')
   // Take only the last portion (where the achievement claim usually is)
@@ -574,8 +651,10 @@ export async function buildJudgePrompt(args: BuildJudgePromptArgs): Promise<stri
     triggerRaw.length > 6000 ? '...[前略]...\n' + triggerRaw.slice(-6000) : triggerRaw
   const subs: Record<string, string> = {
     '{{OBJECTIVE}}': objective.trim(),
+    '{{PLAN}}': plan.trim() || '（plan.md なし）',
     '{{DIGEST}}': digest.trim(),
-    '{{TRIGGER_TURN}}': triggerExcerpt
+    '{{TRIGGER_TURN}}': triggerExcerpt,
+    '{{ENV_NOTE}}': buildJudgeEnvNote(args.useClaude)
   }
   let out = JUDGE_PROMPT_TEMPLATE
   for (const [k, v] of Object.entries(subs)) out = out.split(k).join(v)
@@ -620,6 +699,230 @@ export function extractCriticFlags(stdout: string): string[] {
     if (bullet) flags.push(bullet[1].trim())
   }
   return flags
+}
+
+/**
+ * judge / block-judge worker が Claude CLI 経由で起動されるとき
+ * `--tools` に渡す利用可能ツールのリスト（カンマ区切り、CLI 引数形式そのまま）。
+ *
+ * **Bash を含めない** のが本機能の核：Claude CLI のパターンマッチは
+ * 「コマンド名のプレフィックス一致」しか見ず、`Bash(cat *)` 下でも
+ * `cat foo > bar` のシェルリダイレクトや `git log | tee file` のパイプ
+ * 経由書き込みを止められない（qa-code-review v4 の実機検証で確定済）。
+ * 一方で worker は判定のための **読み取り** だけで動く想定なので、
+ * Read / Glob / Grep のビルトインツールだけあれば証拠収集には十分。
+ *
+ * 変換ロジックを呼び出し側に持たせるとドリフトの温床になるので、CLI 引数
+ * 形式（カンマ区切り）で定義し runTurn.ts は素通しで渡す。同じ内容を
+ * {@link JUDGE_ALLOWED_TOOLS_DESCRIPTION} がプロンプト用の自然言語に整形
+ * しているため、追加・削除は必ず両定数を同時に更新すること。
+ */
+export const JUDGE_ALLOWED_TOOLS_CLI = 'Read,Glob,Grep'
+
+/**
+ * Claude CLI の `--mcp-config` に渡す「全 MCP サーバー無効化」設定の JSON 文字列。
+ * `--strict-mcp-config` と併用することで、ユーザーが `~/.claude/.mcp.json` 等で
+ * 登録している外部ツール（Google Drive / 画像生成 / etc.）を judge worker の
+ * セッションから完全に排除する。runTurn.ts のインライン直書きを避け、
+ * 「MCP 無効化」の意図を 1 箇所に集約するための定数。
+ */
+export const EMPTY_MCP_CONFIG = JSON.stringify({ mcpServers: {} })
+
+/**
+ * judge / block-judge worker のプロンプトに埋め込む「利用可能ツール」の
+ * 自然言語表現。{@link JUDGE_ALLOWED_TOOLS_CLI} と内容を一致させること。
+ */
+export const JUDGE_ALLOWED_TOOLS_DESCRIPTION =
+  'Read（ファイル読み取り）/ Glob（パス一致）/ Grep（テキスト検索）の 3 つのみ'
+
+/**
+ * judge / block-judge prompt 内に注入する「実行環境の制約」セクションを組み立てる。
+ * Codex Goal は通常 codex CLI で worker を回すが、critic_model に Claude 系を
+ * 選んだ場合は claude CLI 経路に切り替わる。両者で制限のかかり方が違うため、
+ * 説明文を分岐する。useClaude は呼び出し側で
+ * `isClaudeCriticModel(settings.critic_model)` を解決して渡す。
+ */
+export function buildJudgeEnvNote(useClaude: boolean): string {
+  if (useClaude) {
+    return [
+      `実行環境では Claude CLI の \`--tools\` で利用可能な内蔵ツールが ${JUDGE_ALLOWED_TOOLS_DESCRIPTION} に`,
+      '限定されている。Bash / Edit / Write / MultiEdit / NotebookEdit は **そもそも呼び出せない**',
+      '（system.init の tools リストに存在しない）。加えて `--strict-mcp-config` で外部 MCP 連携、',
+      '`--disable-slash-commands` で slash commands、`--setting-sources \'\'` で user / project /',
+      'local の settings 読み込み（hooks / CLAUDE.md auto-discovery 等を含む）を遮断している。',
+      'agents / skills は system.init に列挙されるが、起動経路となる Task ツールが tools リストに',
+      'なく実際の invoke は不可能。判定に必要な情報は Read / Glob / Grep だけで集めること。',
+      'git log や ls 等の shell コマンドは使えないので、必要ならファイルを直接読み取って判断する。'
+    ].join('\n')
+  }
+  return [
+    '実行環境は codex CLI の `--sandbox read-only` で起動されている。',
+    'ファイル書き込み・削除・リネーム・chmod 等の破壊的操作はすべて sandbox で',
+    '拒否される。読み取り系（cat / ls / find / grep / git log 等）は許可。',
+    'もし誤って書き込みを試みても失敗するため、リカバリーで時間を浪費せず',
+    '読み取りだけで判定を完結させること。'
+  ].join('\n')
+}
+
+// ---------- Block-judge worker (10ターン毎の終了/逸脱判定) ----------
+
+interface BuildBlockJudgePromptArgs {
+  goalId: string
+  blockId: string
+  fromTurn: number
+  toTurn: number
+  // critic_model が Codex 系のとき true。env note 文言を分岐させる。
+  useClaude: boolean
+}
+
+const BLOCK_JUDGE_PROMPT_TEMPLATE = `# Block-Boundary Judge Worker (外部レビュアー)
+
+あなたは独立した **ブロック境界レビュアー** です。10 ターン毎にメイン worker の
+進捗を別系統モデルから客観的にチェックし、以下の 4 軸で判定します:
+
+1. **完了済みでは？** — メイン worker は「あと一歩」と言い続けて止まらないことがある。
+   ゴールに照らして既に十分な成果が出ていないか冷静に判断する。
+2. **ゴールが逸れていないか** — 当初の objective から方向が外れた瑣末タスクで
+   無限ループしていないか確認する。
+3. **プランから逸脱していないか** — \`plan.md\` のマイルストーン（M1, M2, …）に対し、
+   実際の作業がどのマイルストーンに位置しているかを特定する。直近ターンの作業が
+   plan のいずれのマイルストーンにも対応していない、もしくは未完のマイルストーンを
+   飛ばして瑣末作業に流れているなら **goal_drift** 相当として扱う（plan は人間が
+   承認済みの設計図なので、無断逸脱は drift と判断する）。plan.md が「（plan.md なし）」
+   なら本軸はスキップしてよい。
+4. **継続して問題ないか** — 上記 3 つに該当しなければ、そのまま続行で良い旨を返す。
+
+メイン worker は sunk-cost バイアスで「もう少しで完成」と思いがち。あなたの仕事は
+**外から見て本当にそうか**を判定することです。**「あと一歩」と書かれていてもゴール
+が達成基準を満たしていれば should_stop と答えてください**。
+
+## 判定対象外（言及してはならない）
+
+- 実機・実環境での動作（実デバイス・GUI 目視・スピーカー音量など）
+- 外部サービスの DOM セレクタ実動作
+- objective.md に「**判定対象外**」「**未検証で良い**」と明記されている項目
+
+これらは「未検証だから止めるべきでない」と判断すること。
+
+## ゴール (objective.md)
+
+{{OBJECTIVE}}
+
+## 現在のプラン (plan.md)
+
+{{PLAN}}
+
+## 直近の digest（メイン worker による自己報告）
+
+{{DIGEST}}
+
+## 過去のブロックサマリ
+
+{{BLOCKS}}
+
+## このブロック (turn-{{FROM}} 〜 turn-{{TO}}) のターン内容（抜粋）
+
+{{TURNS_RAW}}
+
+## ワークスペース内の証拠を自分で確認してよい
+
+cwd はゴールのワークスペースに固定されている。判定に必要なら **読み取り** で
+現状を確認してよい。ただし**新規実装やファイル編集は一切行わない**。判定のための
+**読み取りのみ**に留めること。
+
+{{ENV_NOTE}}
+
+## 出力フォーマット（必須）
+
+最後に必ず以下の 2 ブロックをこの順で出力してください。
+
+<block-judge-reason>
+（2〜4 文で判定根拠を述べる。証拠を 1 件以上ゴール / digest / ターンログから引用すること。
+plan.md がある場合は **現在どのマイルストーンを実行中と認識したか** を必ず 1 文目で明記し、
+直近ターンの作業がそのマイルストーンに沿っているかを述べること）
+</block-judge-reason>
+
+<block-judge-verdict>continue</block-judge-verdict>
+
+または
+
+<block-judge-verdict>should_stop</block-judge-verdict>
+
+または
+
+<block-judge-verdict>goal_drift</block-judge-verdict>
+
+verdict の意味:
+- **continue**: 現方針で問題なし。メイン worker は引き続き作業して良い。
+- **should_stop**: ゴールの達成基準は既に満たされている / もう続ける必要がない。
+  メイン worker に完了を再考させたい場合。
+- **goal_drift**: 当初の objective から逸れた瑣末タスクで時間を浪費している、
+  もしくは plan.md のマイルストーンから外れた作業を続けている。
+  メイン worker にプラン再考 or タスク絞り込みを促したい場合。
+`
+
+export async function buildBlockJudgePrompt(args: BuildBlockJudgePromptArgs): Promise<string> {
+  const dir = goalDir(args.goalId)
+  const objective = await fs.readFile(path.join(dir, 'objective.md'), 'utf8').catch(() => '')
+  const digest = await fs.readFile(path.join(dir, 'digest.md'), 'utf8').catch(() => '')
+  const plan = await fs.readFile(path.join(dir, 'plan.md'), 'utf8').catch(() => '')
+  const blocks = await readBlocksDigest(args.goalId)
+  const rawParts: string[] = []
+  for (let i = args.fromTurn; i <= args.toTurn; i++) {
+    const id = `turn-${String(i).padStart(3, '0')}`
+    const stdoutPath = path.join(dir, 'turns', `${id}.stdout`)
+    try {
+      const stdout = await fs.readFile(stdoutPath, 'utf8')
+      // ジャッジは判定材料が欲しいだけなのでブロックサマリよりは緩めに抜粋
+      const trimmed =
+        stdout.length > 5000
+          ? stdout.slice(0, 2000) + '\n...[中略]...\n' + stdout.slice(-2500)
+          : stdout
+      rawParts.push(`### ${id}\n\`\`\`\n${trimmed}\n\`\`\``)
+    } catch {
+      rawParts.push(`### ${id}\n(読み込みエラー)`)
+    }
+  }
+  const subs: Record<string, string> = {
+    '{{OBJECTIVE}}': objective.trim(),
+    '{{PLAN}}': plan.trim() || '（plan.md なし）',
+    '{{DIGEST}}': digest.trim() || '（digest.md なし）',
+    '{{BLOCKS}}': blocks.trim() || '（過去ブロックなし）',
+    '{{FROM}}': String(args.fromTurn),
+    '{{TO}}': String(args.toTurn),
+    '{{TURNS_RAW}}': rawParts.join('\n\n'),
+    '{{ENV_NOTE}}': buildJudgeEnvNote(args.useClaude)
+  }
+  let out = BLOCK_JUDGE_PROMPT_TEMPLATE
+  for (const [k, v] of Object.entries(subs)) out = out.split(k).join(v)
+  return out
+}
+
+export type BlockJudgeVerdict = 'continue' | 'should_stop' | 'goal_drift'
+
+// 最後にマッチした verdict を取る。worker が prompt 内の例示タグや、思考過程
+// で書いたタグを途中で出力しても、最終的に確定した verdict が拾えるように
+// last-match スキャンを採用する（既存 extractDigestUpdate と同じ思想）。
+export function extractBlockJudgeVerdict(stdout: string): BlockJudgeVerdict | null {
+  const re = /<block-judge-verdict>\s*(continue|should_stop|goal_drift)\s*<\/block-judge-verdict>/g
+  let last: RegExpExecArray | null = null
+  let m: RegExpExecArray | null
+  while ((m = re.exec(stdout)) !== null) {
+    last = m
+  }
+  if (!last) return null
+  return last[1] as BlockJudgeVerdict
+}
+
+// 最後の <block-judge-reason> ブロックを採用する（last-match）。
+export function extractBlockJudgeReason(stdout: string): string {
+  const re = /<block-judge-reason>([\s\S]*?)<\/block-judge-reason>/g
+  let last: RegExpExecArray | null = null
+  let m: RegExpExecArray | null
+  while ((m = re.exec(stdout)) !== null) {
+    last = m
+  }
+  return last ? last[1].trim() : ''
 }
 
 // ---------- Digest compressor ----------
@@ -696,19 +999,20 @@ export function extractCompressedDigest(stdout: string): string | null {
 
 // ---------- Rate-limit detection (Phase 4.2 A2) ----------
 
-// Patterns emitted when the usage window is exhausted.
+// Patterns Codex / Claude CLIs emit when the usage window is exhausted.
 // Tested against transcripts but kept conservative to avoid false positives:
 // each pattern includes both a generic keyword and a quota-specific keyword.
 const RATE_LIMIT_PATTERNS: RegExp[] = [
   /\b5[\s-]?hour\b[\s\S]{0,80}\b(usage|limit|window|reset)/i,
   /\busage limit\b/i,
   /\brate limit(ed|ing)?\b[\s\S]{0,80}\b(usage|window|reset|tokens?|requests?|quota)/i,
+  /\brate limit(ed|ing)?\b[\s\S]{0,80}\b(reached|exceeded|try again)/i,
   /\bquota (exceeded|reached)\b/i,
   /\btry again (in|after)\b[\s\S]{0,40}\b(hour|hours|h|min)/i
 ]
 
 /**
- * Detect whether a turn's stdout/stderr indicates the Codex usage window has
+ * Detect whether a turn's stdout/stderr indicates the CLI usage window has
  * been exhausted. Best-effort — we err on the side of false negatives to avoid
  * spuriously pausing a healthy runner. Returns the matched substring (for
  * diagnostics) or null when no pattern matches.

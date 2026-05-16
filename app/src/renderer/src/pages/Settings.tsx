@@ -1,7 +1,12 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { SUPPORTED_MODELS, type GlobalSettings, type GoalBudget } from '@shared/types'
+import {
+  CRITIC_MODEL_OPTIONS,
+  SUPPORTED_MODELS,
+  type GlobalSettings,
+  type GoalBudget
+} from '@shared/types'
 
 const FALLBACK_BUDGET: GoalBudget = {
   max_turns: 300,
@@ -97,7 +102,7 @@ export default function Settings(): JSX.Element {
         <fieldset className="rounded-md border border-zinc-800 bg-bg-secondary p-5">
           <legend className="px-2 text-sm font-medium text-zinc-200">使用モデル</legend>
           <p className="mb-4 mt-1 px-2 text-xs text-zinc-500">
-            ターン実行で <code className="mx-1 rounded bg-bg-tertiary px-1.5 py-0.5">codex --model</code>{' '}
+            ターン実行および対話型プランセッションで <code className="mx-1 rounded bg-bg-tertiary px-1.5 py-0.5">codex --model</code>{' '}
             に渡されるモデル ID。長期・複雑なゴールでは GPT-5.5 を推奨します。
           </p>
           <Field
@@ -118,7 +123,7 @@ export default function Settings(): JSX.Element {
           </Field>
           <Field
             label="Critic / Judge モデル（任意）"
-            hint="達成主張を独立検証する critic worker 用。メインと違うモデルにすると訓練分布が分かれて共通盲点を減らせます。未指定時はメインと同じモデル。"
+            hint="達成主張の検証と 10 ターン毎のブロック境界レビューに使うモデル。「メインと同じ」を選ぶとメインモデルがそのままジャッジ役を兼ねます。GPT 系を選ぶと codex CLI、Claude 系を選ぶと claude CLI で読み取り専用 judge を起動します（Claude 系は要 claude バイナリ）。別系統モデルを選ぶほど共通盲点が減らせます。"
           >
             <select
               value={criticModel}
@@ -126,11 +131,22 @@ export default function Settings(): JSX.Element {
               className="w-full rounded-md border border-zinc-800 bg-bg-tertiary px-3 py-2 text-sm text-zinc-100 outline-none focus:border-accent"
             >
               <option value="">（メインと同じ）</option>
-              {SUPPORTED_MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
+              <optgroup label="GPT / Codex を明示指定">
+                {SUPPORTED_MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="別系統モデル">
+                {CRITIC_MODEL_OPTIONS.filter(
+                  (m) => !SUPPORTED_MODELS.some((s) => s.id === m.id)
+                ).map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </optgroup>
             </select>
           </Field>
         </fieldset>

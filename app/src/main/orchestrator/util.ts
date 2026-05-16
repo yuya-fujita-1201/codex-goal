@@ -10,7 +10,7 @@ export function goalDir(goalId: string): string {
   return path.join(GOALS_ROOT, goalId)
 }
 
-export type WorkSubdir = 'turns' | 'blocks' | 'judge' | 'compressor'
+export type WorkSubdir = 'turns' | 'blocks' | 'judge' | 'block-judge' | 'compressor'
 
 export function turnPaths(
   goalId: string,

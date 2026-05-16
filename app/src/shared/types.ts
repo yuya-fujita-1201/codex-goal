@@ -105,6 +105,29 @@ export const SUPPORTED_MODELS = [
 
 export type SupportedModelId = (typeof SUPPORTED_MODELS)[number]['id']
 
+// Critic / judge / block-judge worker のモデル選択肢。Codex のサブモデルに加えて
+// Claude CLI 経由で別系統モデルにジャッジさせる選択肢を含む。Claude 系の id を
+// 選ぶと runner は codex CLI ではなく claude CLI で judge / block-judge worker を起動する。
+export const CRITIC_MODEL_OPTIONS = [
+  ...SUPPORTED_MODELS,
+  { id: 'claude-opus-4-7', label: 'Claude Opus 4.7（Claude CLI 経由）' },
+  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6（Claude CLI 経由）' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5（Claude CLI 経由）' }
+] as const
+
+export type CriticModelId = (typeof CRITIC_MODEL_OPTIONS)[number]['id']
+
+const CLAUDE_MODEL_IDS = new Set<string>([
+  'claude-opus-4-7',
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001'
+])
+
+export function isClaudeCriticModel(id: string | null | undefined): boolean {
+  if (typeof id !== 'string' || id.length === 0) return false
+  return CLAUDE_MODEL_IDS.has(id)
+}
+
 /**
  * PR-D: structured result emitted by checker.sh as a `<checker-result>JSON
  * </checker-result>` block at the end of stdout. The exit code is still the
@@ -135,7 +158,7 @@ export interface TurnRecord {
   ended_at: string
 }
 
-export type WorkKind = 'turn' | 'block' | 'judge'
+export type WorkKind = 'turn' | 'block' | 'judge' | 'block-judge'
 
 export interface TurnHistoryEntry {
   kind: WorkKind

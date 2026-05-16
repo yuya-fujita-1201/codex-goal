@@ -3,9 +3,8 @@ import { Transform, type TransformCallback } from 'node:stream'
 /**
  * TypeScript port of `app/resources/format-stream.py`.
  *
- * Converts `codex exec --json` JSONL events into a human-readable transcript.
- * It also keeps compatibility with the previous Claude stream-json event
- * shape used by older tests/goal logs. The transcript intentionally preserves:
+ * Converts `claude --output-format stream-json --verbose` JSONL events
+ * into a human-readable transcript. The transcript intentionally preserves:
  *   - assistant text content verbatim (so <digest-update>...</digest-update>
  *     and <goal-status>...</goal-status> markers survive for the orchestrator's
  *     regex extraction in turn-NNN.stdout)
@@ -85,60 +84,6 @@ export function formatStreamLine(rawLine: string): string {
       return `[session start — model=${model}]\n`
     }
     return `[system: ${sub}]\n`
-  }
-
-  if (t === 'thread.started') {
-    const id = typeof event.thread_id === 'string' ? event.thread_id : '?'
-    return `[thread start — id=${id}]\n`
-  }
-
-  if (t === 'turn.started') {
-    return '[turn started]\n'
-  }
-
-  if (t === 'item.completed') {
-    const item = (event.item && typeof event.item === 'object'
-      ? (event.item as Record<string, unknown>)
-      : {}) as Record<string, unknown>
-    const itemType = typeof item.type === 'string' ? item.type : ''
-
-    if (itemType === 'agent_message') {
-      const text = typeof item.text === 'string' ? item.text : ''
-      if (!text) return ''
-      return text.endsWith('\n') ? text : text + '\n'
-    }
-
-    if (itemType === 'command_execution') {
-      const command =
-        typeof item.command === 'string'
-          ? item.command
-          : typeof item.cmd === 'string'
-            ? item.cmd
-            : ''
-      const output = typeof item.output === 'string' ? item.output : ''
-      let out = '\n▶ [command]'
-      if (command) out += ` ${truncate(command, INPUT_TRUNCATE_LIMIT)}`
-      out += '\n'
-      if (output) out += `${truncate(output, TOOL_RESULT_TRUNCATE_LIMIT)}\n`
-      return out
-    }
-
-    return ''
-  }
-
-  if (t === 'turn.completed') {
-    const usage = event.usage && typeof event.usage === 'object'
-      ? (event.usage as Record<string, unknown>)
-      : null
-    const extras: string[] = []
-    const input = usage?.input_tokens
-    const cached = usage?.cached_input_tokens
-    const output = usage?.output_tokens
-    if (typeof input === 'number') extras.push(`input_tokens=${input}`)
-    if (typeof cached === 'number') extras.push(`cached=${cached}`)
-    if (typeof output === 'number') extras.push(`output_tokens=${output}`)
-    const extra = extras.length ? ' ' + extras.join(' ') : ''
-    return `\n=== turn completed${extra} ===\n`
   }
 
   if (t === 'assistant') {

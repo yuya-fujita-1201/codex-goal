@@ -4,7 +4,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
-import { SUPPORTED_MODELS } from '@shared/types'
+import { CRITIC_MODEL_OPTIONS, SUPPORTED_MODELS } from '@shared/types'
 import type { GlobalSettings, GoalBudget } from '@shared/types'
 import { GOALS_ROOT, ensureGoalsRoot } from './goalStore'
 
@@ -18,7 +18,10 @@ export const DEFAULT_BUDGET: GoalBudget = {
 
 export const DEFAULT_MODEL = 'gpt-5.5'
 
+// critic_model はメイン用とは別に Claude 系も許容する。Claude を選ぶと runner
+// が codex CLI ではなく claude CLI で judge / block-judge worker を起動する。
 const SUPPORTED_MODEL_IDS = new Set<string>(SUPPORTED_MODELS.map((m) => m.id))
+const CRITIC_MODEL_IDS = new Set<string>(CRITIC_MODEL_OPTIONS.map((m) => m.id))
 
 const DEFAULT_SETTINGS: GlobalSettings = {
   default_budget: { ...DEFAULT_BUDGET },
@@ -57,7 +60,7 @@ function validateModel(m: unknown): string {
  */
 function validateCriticModel(m: unknown): string | undefined {
   if (typeof m !== 'string' || m === '') return undefined
-  if (SUPPORTED_MODEL_IDS.has(m)) return m
+  if (CRITIC_MODEL_IDS.has(m)) return m
   return undefined
 }
 

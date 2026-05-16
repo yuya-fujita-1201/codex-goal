@@ -257,8 +257,13 @@ export default function NewGoal(): JSX.Element {
       </div>
 
       <h1 className="mb-2 text-2xl font-semibold tracking-tight">新規ゴール</h1>
-      <p className="mb-6 text-sm text-zinc-400">
+      <p className="mb-2 text-sm text-zinc-400">
         達成したいゴールを自然言語で書いてください。エージェントが自走してこのゴールを目指します。
+      </p>
+      <p className="mb-6 text-xs text-zinc-500">
+        判定が独立検証不能な要件（実機テスト・GUI 目視・外部サービスの実動作確認など）で
+        無限ブロックしないよう、必要なら「**達成条件**」と「**判定対象外**」を明記すると
+        スムーズです（例下記）。
       </p>
 
       <form onSubmit={onSubmit} className="space-y-5">
@@ -269,7 +274,13 @@ export default function NewGoal(): JSX.Element {
           autoFocus
           placeholder={
             '例: 認証フローをリファクタしてテスト全部緑にする。\n' +
-            '具体的には ...'
+            '具体的には ...\n\n' +
+            '## 達成条件\n' +
+            '- npm test が 0 失敗で通る\n' +
+            '- src/auth/*.ts に新しい middleware 関数が実装されている\n\n' +
+            '## 判定対象外（独立検証不能）\n' +
+            '- 実機/シミュレータでの目視確認\n' +
+            '- 本番環境への接続確認\n'
           }
           className="w-full rounded-md border border-zinc-800 bg-bg-secondary px-4 py-3 font-mono text-sm text-zinc-100 outline-none transition focus:border-accent"
         />
@@ -285,7 +296,7 @@ export default function NewGoal(): JSX.Element {
             <span className="block font-medium">詳細プランニング</span>
             <span className="block text-xs text-zinc-500">
               自走を開始する前に Codex と対話してプランを練り上げ、承認してから着手します。
-              プラン作成中は読み取り専用で実行されます。
+              長期・複雑なゴールで効果的です。
             </span>
           </span>
         </label>

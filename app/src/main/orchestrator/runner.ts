@@ -11,20 +11,29 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 
 import type { CheckerResult, GoalBudget, GoalEvent, GoalState, GoalStatus } from '@shared/types'
+import { isClaudeCriticModel } from '@shared/types'
+import { getSettings } from '../settings'
 import { isDefaultSampleCheckerTemplate } from '@shared/checkerTemplate'
 import {
   decideAchievementVerification,
   effectiveVerificationMode,
   type CheckerRunOutcome
 } from '@shared/verification'
+import {
+  getRunnerActivationTransition,
+  shouldRunnerStopImmediately
+} from '@shared/statusPolicy'
 
 import * as goalStore from '../goalStore'
 import {
+  buildBlockJudgePrompt,
   buildBlockPrompt,
   buildDigestCompressorPrompt,
   buildJudgePrompt,
   buildPrompt,
   detectRateLimit,
+  extractBlockJudgeReason,
+  extractBlockJudgeVerdict,
   extractBlockSummary,
   extractCheckerResult,
   extractCompressedDigest,
@@ -35,7 +44,8 @@ import {
   extractPlan,
   extractUserReplies,
   hasGoalAchievedToken,
-  lintDigestSections
+  lintDigestSections,
+  type BlockJudgeVerdict
 } from './prompt'
 import { startRunTurn, type RunTurnHandle } from './runTurn'
 import { TailWatcher } from './tail'
@@ -56,14 +66,11 @@ const BLOCK_SIZE = 10 // run a block summary every N main turns
 const MAX_CONSECUTIVE_ANOMALIES = 3 // transition to 'blocked' after this many
 const DIGEST_COMPRESS_THRESHOLD_BYTES = 16 * 1024 // 16 KB — kick compressor if digest exceeds this
 // Phase 4.2 A2: when a rate-limit response is detected, pause the runner and
-// schedule resume. Codex limit messages may include a retry duration; when
-// they do not, use a conservative one-hour fallback plus slack.
-const RATE_LIMIT_SLACK_MS = 5 * 60 * 1000
-const RATE_LIMIT_FALLBACK_PAUSE_MS = 60 * 60 * 1000 + RATE_LIMIT_SLACK_MS
+// schedule resume after a 5h window + 5min slack so the CLI has surely refilled.
+const RATE_LIMIT_PAUSE_MS = 5 * 60 * 60 * 1000 + 5 * 60 * 1000
 
 type StopReason = 'completed' | 'aborted'
 type HardCheckerRunResult = { outcome: CheckerRunOutcome; result: CheckerResult | null }
-const MAX_CONSECUTIVE_VERIFICATION_REJECTIONS = 3
 
 const ANOMALY_RESULTS = new Set([
   'TIMEOUT',
@@ -76,16 +83,6 @@ function isAnomaly(result: string): boolean {
   if (ANOMALY_RESULTS.has(result)) return true
   if (result.startsWith('FAIL')) return true
   return false
-}
-
-function rateLimitPauseMs(reason: string): number {
-  const m = reason.match(/\b(?:try again|retry|reset)?\s*(?:in|after)?\s*(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m)\b/i)
-  if (!m) return RATE_LIMIT_FALLBACK_PAUSE_MS
-  const amount = Number(m[1])
-  if (!Number.isFinite(amount) || amount <= 0) return RATE_LIMIT_FALLBACK_PAUSE_MS
-  const unit = m[2].toLowerCase()
-  const base = unit.startsWith('h') ? amount * 60 * 60 * 1000 : amount * 60 * 1000
-  return Math.min(Math.max(base + RATE_LIMIT_SLACK_MS, RATE_LIMIT_SLACK_MS), 6 * 60 * 60 * 1000)
 }
 
 export class GoalRunner extends EventEmitter {
@@ -115,6 +112,11 @@ export class GoalRunner extends EventEmitter {
   // into the next turn's prompt via {{CRITIC_FLAGS}} so the worker addresses
   // the specific gap instead of guessing at new approaches.
   private lastCriticFlags: string[] = []
+  // Block-judge: 10ターン毎の外部レビュアー（critic_model）から返ってきた
+  // advisory note。should_stop / goal_drift と判定されたときに整形済みの注意
+  // 文字列が入る。次ターンの prompt の最上段に注入され、メイン worker が読んだ
+  // ら（=新ターンが完走したら）消費して空に戻す。1 ブロック分しか保持しない。
+  private pendingReviewerNote: string = ''
 
   constructor(public readonly goalId: string) {
     super()
@@ -190,14 +192,7 @@ export class GoalRunner extends EventEmitter {
           return 'completed'
         }
 
-        if (
-          state.status === 'achieved' ||
-          state.status === 'abandoned' ||
-          state.status === 'budget_exhausted' ||
-          state.status === 'blocked' ||
-          state.status === 'paused' ||
-          state.status === 'planning'
-        ) {
+        if (shouldRunnerStopImmediately(state.status)) {
           await this.log('info', `Status is '${state.status}' — stopping loop`)
           return 'completed'
         }
@@ -253,6 +248,7 @@ export class GoalRunner extends EventEmitter {
         const prevTurnId = turnNum > 1 ? formatTurnId(turnNum - 1) : null
         const evidence = await this.collectEvidence(state.workspace_path, prevTurnId)
 
+        const reviewerNote = this.pendingReviewerNote
         const promptText = await buildPrompt({
           state,
           budget,
@@ -262,8 +258,20 @@ export class GoalRunner extends EventEmitter {
           userMessages,
           evidence,
           lastCheckerResult: this.lastCheckerResult,
-          lastCriticFlags: this.lastCriticFlags
+          lastCriticFlags: this.lastCriticFlags,
+          reviewerNote
         })
+        // note 消費は **main turn が完走した後** に行う（後段の "consumed by
+        // main turn" ブロック参照）。INTERRUPTED / ABORTED / FAIL で途中終了
+        // した場合、worker が note を実際に読んだ保証がないため pending を
+        // 保持して次ターンで再注入する。
+        //
+        // 永続化（state.json への書き出し）はしない: 本機能は advisory =
+        // best-effort であり、Electron プロセスがクラッシュしたら note 自体
+        // を失っても次のブロック境界（最大 10 ターン後）で再判定が走る。
+        // クラッシュ時に「失われたら困る」種類の情報ではないため、メモリ保持
+        // で十分とした（永続化はファイル I/O コストと state スキーマ複雑化に
+        // 見合わない）。
 
         const { result, stdout } = await this.runWorker('turns', turnId, promptText, budget, {
           tail: true
@@ -337,15 +345,15 @@ export class GoalRunner extends EventEmitter {
           }
         }
 
-        // Phase 4.2 A2: rate-limit detection — if Codex reported the 5-hour
+        // Phase 4.2 A2: rate-limit detection — if the CLI reported the 5-hour
         // usage window is exhausted, pause the runner and schedule auto-resume.
-        // Read stderr too, since the CLI may emit limit messages there.
+        // Read stderr too, since CLIs may emit limit messages there.
         if (result !== 'ABORTED') {
           const stderrPath = turnPaths(this.goalId, turnId, 'turns').stderr
           const stderrText = await fs.readFile(stderrPath, 'utf8').catch(() => '')
           const rlMatch = detectRateLimit(stdout) ?? detectRateLimit(stderrText)
           if (rlMatch) {
-            const resumeAt = new Date(Date.now() + rateLimitPauseMs(rlMatch))
+            const resumeAt = new Date(Date.now() + RATE_LIMIT_PAUSE_MS)
               .toISOString()
               .replace(/\.\d+Z$/, 'Z')
             await this.log(
@@ -402,6 +410,14 @@ export class GoalRunner extends EventEmitter {
             )
           }
           this.consecutiveAnomalies = 0
+
+          // Main turn が DONE で完走した = worker が prompt 冒頭の reviewer-note
+          // を読んだとみなして pending を消す。前段で reviewerNote をローカル
+          // 変数に退避してあるため、消費後に block-judge が新たな note を
+          // セットしてもこのターン分だけが消える。
+          if (reviewerNote && this.pendingReviewerNote === reviewerNote) {
+            this.pendingReviewerNote = ''
+          }
 
           // process digest update only on successful turns
           const digestUpdate = extractDigestUpdate(stdout)
@@ -505,10 +521,9 @@ export class GoalRunner extends EventEmitter {
             // C4: cooldown — if judge said not_yet within the last 3 turns, skip re-judging.
             const turnsSinceJudge = turnNum - this.lastJudgeAtTurn
             if (this.lastJudgeVerdict === 'not_yet' && turnsSinceJudge < 3) {
-              const stopped = await this.rejectAchievementClaim(
+              await this.rejectAchievementClaim(
                 `Judge cooldown active after previous not_yet verdict (${turnsSinceJudge} turns ago)`
               )
-              if (stopped) return 'completed'
             } else {
               // Phase 3: run judge worker for independent verification
               const verdict = await this.runJudgeWorker(turnId, budget)
@@ -524,12 +539,10 @@ export class GoalRunner extends EventEmitter {
                 await this.updateState({ status: 'achieved' })
                 return 'completed'
               }
-              const stopped = await this.rejectAchievementClaim(secondDecision.reason)
-              if (stopped) return 'completed'
+              await this.rejectAchievementClaim(secondDecision.reason)
             }
           } else {
-            const stopped = await this.rejectAchievementClaim(firstDecision.reason)
-            if (stopped) return 'completed'
+            await this.rejectAchievementClaim(firstDecision.reason)
           }
         } else {
           this.consecutiveVerificationRejections = 0
@@ -539,7 +552,29 @@ export class GoalRunner extends EventEmitter {
         if (turnNum > 0 && turnNum % BLOCK_SIZE === 0) {
           const blockNum = Math.floor(turnNum / BLOCK_SIZE)
           const fromTurn = turnNum - BLOCK_SIZE + 1
-          await this.runBlockSummarizer(blockNum, fromTurn, turnNum, budget)
+          const summarizerOk = await this.runBlockSummarizer(
+            blockNum,
+            fromTurn,
+            turnNum,
+            budget
+          )
+          // ブロックサマリ生成直後に外部レビュアー（critic_model）を回して
+          // 「終わってもいいのでは / 方向が逸れていないか」を別系統モデルで
+          // 客観的にチェックする。Advisory: should_stop / goal_drift と判定
+          // されたら次ターンの prompt 最上段に reviewer-note として注入し、
+          // メイン worker に再考の機会を与える。強制停止はしない。
+          //
+          // summarizer が失敗した場合、ブロックサマリ自体が無いので judge に
+          // 渡す情報が不完全になる。誤判定リスクが高いので skip して次ブロック
+          // を待つ（10 ターン後に再挑戦）。
+          if (summarizerOk) {
+            await this.runBlockJudge(blockNum, fromTurn, turnNum, budget)
+          } else {
+            await this.log(
+              'warn',
+              `Block summarizer failed for block-${String(blockNum).padStart(3, '0')} — skipping block-judge (would judge on incomplete data)`
+            )
+          }
         }
 
         // digest compressor — if digest.md has grown beyond the threshold,
@@ -579,7 +614,7 @@ export class GoalRunner extends EventEmitter {
     fromTurn: number,
     toTurn: number,
     budget: GoalBudget
-  ): Promise<void> {
+  ): Promise<boolean> {
     const blockId = `block-${String(blockNum).padStart(3, '0')}`
     await this.log(
       'info',
@@ -596,17 +631,92 @@ export class GoalRunner extends EventEmitter {
     })
     if (result !== 'DONE') {
       await this.log('warn', `Block summarizer ${blockId} returned ${result} — skipping`)
-      return
+      return false
     }
     const summary = extractBlockSummary(stdout)
     if (!summary) {
       await this.log('warn', `${blockId}: no <block-summary> tag found — skipping save`)
-      return
+      return false
     }
     const blocksDir = path.join(goalDir(this.goalId), 'history', 'blocks')
     await fs.mkdir(blocksDir, { recursive: true })
     await fs.writeFile(path.join(blocksDir, `${blockId}.md`), summary, 'utf8')
     await this.log('info', `${blockId} saved`)
+    return true
+  }
+
+  // -------- block-boundary judge --------
+
+  /**
+   * 10ターン毎にブロックを作った後、別系統モデル（settings.critic_model）に
+   * 「終わってもいいのでは / ゴールが逸れていないか」を判定させる advisory
+   * worker。should_stop / goal_drift と判定された場合は次ターンの prompt の
+   * 最上段に reviewer-note を注入してメイン worker に再考を促す。
+   *
+   * 強制停止はしない（Advisory）— あくまでメイン worker が棄却可能。これに
+   * より「critic が暴走して有用なタスクを止める」リスクをゼロにしている。
+   * 棄却された場合は digest に理由が残るので、後から「critic 精度」を観測
+   * できる。
+   */
+  private async runBlockJudge(
+    blockNum: number,
+    fromTurn: number,
+    toTurn: number,
+    budget: GoalBudget
+  ): Promise<void> {
+    const blockId = `block-${String(blockNum).padStart(3, '0')}`
+    const judgeId = `bjudge-${String(blockNum).padStart(3, '0')}`
+    await this.log('info', `Starting ${judgeId} (block-boundary judge for ${blockId})`)
+    // critic_model が Codex 系のときはプロンプト内の「実行環境の制約」セクションを
+    // codex sandbox の説明に切り替える。Claude 系のときは --tools での制限の説明。
+    const settings = await getSettings()
+    const useClaude = isClaudeCriticModel(settings.critic_model)
+    const prompt = await buildBlockJudgePrompt({
+      goalId: this.goalId,
+      blockId,
+      fromTurn,
+      toTurn,
+      useClaude
+    })
+    const { result, stdout } = await this.runWorker('block-judge', judgeId, prompt, budget, {
+      tail: true
+    })
+    if (result !== 'DONE') {
+      await this.log('warn', `${judgeId} returned ${result} — skipping advisory injection`)
+      return
+    }
+    const verdict = extractBlockJudgeVerdict(stdout)
+    const reason = extractBlockJudgeReason(stdout)
+    if (!verdict) {
+      await this.log('warn', `${judgeId}: no <block-judge-verdict> tag found — skipping`)
+      return
+    }
+    await this.log(
+      'info',
+      `${judgeId} verdict: ${verdict}${reason ? ` — ${reason}` : ''}`
+    )
+    if (verdict === 'continue') {
+      // 何もしない: 通常進行
+      return
+    }
+    this.pendingReviewerNote = this.formatReviewerNote(verdict, reason, blockId)
+  }
+
+  private formatReviewerNote(
+    verdict: BlockJudgeVerdict,
+    reason: string,
+    blockId: string
+  ): string {
+    const header =
+      verdict === 'should_stop'
+        ? `**判定: should_stop**（${blockId} 時点）`
+        : `**判定: goal_drift**（${blockId} 時点）`
+    const detail =
+      verdict === 'should_stop'
+        ? 'ゴールの完了基準が既に満たされている可能性があります。プラン / digest / 実装内容を見直し、達成済みなら <goal-status>achieved</goal-status> を出力すること。'
+        : '現在の作業が当初の objective から逸れている可能性があります。プランを最小タスクに絞り直し、本筋に戻ること。瑣末タスクで時間を浪費しない。'
+    const reasonLine = reason ? `\n> 理由: ${reason.replace(/\n+/g, ' ').trim()}` : ''
+    return `${header}\n${detail}${reasonLine}`
   }
 
   // -------- digest compressor --------
@@ -690,7 +800,9 @@ export class GoalRunner extends EventEmitter {
   ): Promise<'achieved' | 'not_yet' | 'error'> {
     const judgeId = `judge-${triggerTurnId.replace(/^turn-/, '')}`
     await this.log('info', `Starting ${judgeId} for ${triggerTurnId}`)
-    const prompt = await buildJudgePrompt({ goalId: this.goalId, triggerTurnId })
+    const settings = await getSettings()
+    const useClaude = isClaudeCriticModel(settings.critic_model)
+    const prompt = await buildJudgePrompt({ goalId: this.goalId, triggerTurnId, useClaude })
     const { result, stdout } = await this.runWorker('judge', judgeId, prompt, budget, {
       tail: true
     })
@@ -818,18 +930,10 @@ export class GoalRunner extends EventEmitter {
       await this.log('info', "Status is 'planning' — runner will not auto-activate")
       return
     }
-    if (state?.status === 'pending') {
-      await this.updateState({ status: 'active' })
-      await this.log('info', "Status: pending → active")
-    } else if (state?.status === 'paused') {
-      // Resume from pause. Covers both manual pause (no next_resume_at) and
-      // rate-limit auto-resume (next_resume_at populated). Without this branch
-      // the new runner reads state, sees status === 'paused', and bails out
-      // immediately at the top of the main loop with "Status is 'paused' —
-      // stopping loop", making the Resume button effectively a no-op.
-      await this.updateState({ status: 'active', next_resume_at: null })
-      await this.log('info', 'Status: paused → active')
-    }
+    const transition = getRunnerActivationTransition(state?.status)
+    if (!transition) return
+    await this.updateState(transition.patch)
+    await this.log('info', transition.logMessage)
   }
 
   private async readState(): Promise<GoalState | null> {
@@ -946,21 +1050,20 @@ export class GoalRunner extends EventEmitter {
     })
   }
 
-  private async rejectAchievementClaim(reason: string): Promise<boolean> {
+  private async rejectAchievementClaim(reason: string): Promise<void> {
     this.consecutiveVerificationRejections += 1
     await this.log(
       'warn',
-      `Achievement claim rejected by verification (${this.consecutiveVerificationRejections}/${MAX_CONSECUTIVE_VERIFICATION_REJECTIONS}): ${reason}`
+      `Achievement claim rejected by verification (rejections so far: ${this.consecutiveVerificationRejections}): ${reason}`
     )
-    if (this.consecutiveVerificationRejections >= MAX_CONSECUTIVE_VERIFICATION_REJECTIONS) {
-      await this.log(
-        'error',
-        'Too many consecutive rejected achievement claims — marking blocked to avoid an endless verification loop'
-      )
-      await this.updateState({ status: 'blocked' })
-      return true
-    }
-    return false
+    // 以前は連続 3 回 reject されたら 'blocked' に遷移して runner を止めて
+    // いたが、これは「judge に指摘されたら worker は次ターンで指摘を直すため
+    // に走り続けてほしい」というユーザー意図と衝突した（issue: ai-66ae36,
+    // 2026-05-13）。critic-flags は {{CRITIC_FLAGS}} で次ターンの prompt
+    // に注入され続けるので、worker は指摘を読みながら自走で修正する。長期的
+    // な暴走に対しては max_turns / max_wall_time のハードリミットが既に効い
+    // ているので、ここで blocked にすることによる追加の安全網は冗長。
+    // counter とログは観測用に残す。
   }
 
   // Generate HANDOFF.md so a follow-up goal can pick up where this one stopped.
@@ -1225,7 +1328,7 @@ export class GoalRunner extends EventEmitter {
 
   /**
    * Write the sentinel result and ask the in-process runTurn handle to
-   * terminate the codex child. As a backup we also fall back to reading the
+   * terminate the spawned CLI child. As a backup we also fall back to reading the
    * pid file and killing the process tree directly — this covers the rare
    * case where the handle has already been garbage-collected (e.g. orphaned
    * pid from a previous app instance picked up by reapOrphanedPids).

@@ -300,14 +300,17 @@ export default function GoalDetail(): JSX.Element {
       status === 'pending' ||
       status === 'paused' ||
       status === 'active' ||
-      status === 'blocked' ||
-      status === 'budget_exhausted'
+      status === 'blocked'
     )
   }, [status, running])
 
   const canPause = running && status === 'active'
   const canResume = !running && status === 'paused'
   const canMarkAchieved = canManuallyMarkAchieved(status, running)
+  const canSendImmediate = Boolean(draft.trim()) && !sending && (running || canStart)
+  const startButtonLabel =
+    running ? '実行中…' : status === 'blocked' ? 'ブロック解除して再開' : '開始'
+  const immediateButtonLabel = running ? '即時反映' : '送って開始'
 
   // elapsed time — freeze at updated_at if the goal is in a terminal status
   const referenceTime =
@@ -350,11 +353,13 @@ export default function GoalDetail(): JSX.Element {
           {currentTurnId && (
             <span
               className={`rounded px-2 py-0.5 text-xs ${
-                currentTurnId.startsWith('block-')
-                  ? 'bg-purple-700/30 text-purple-200'
-                  : currentTurnId.startsWith('judge-')
-                    ? 'bg-sky-700/30 text-sky-200'
-                    : 'bg-amber-700/30 text-amber-200'
+                currentTurnId.startsWith('bjudge-')
+                  ? 'bg-rose-700/30 text-rose-200'
+                  : currentTurnId.startsWith('block-')
+                    ? 'bg-purple-700/30 text-purple-200'
+                    : currentTurnId.startsWith('judge-')
+                      ? 'bg-sky-700/30 text-sky-200'
+                      : 'bg-amber-700/30 text-amber-200'
               }`}
             >
               {currentTurnId}
@@ -384,7 +389,7 @@ export default function GoalDetail(): JSX.Element {
           disabled={!canStart}
           className="rounded-md bg-emerald-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          {running ? '実行中…' : '開始'}
+          {startButtonLabel}
         </button>
         <button
           onClick={onPause}
@@ -460,11 +465,15 @@ export default function GoalDetail(): JSX.Element {
             </button>
             <button
               onClick={() => void onSendMessage(true)}
-              disabled={sending || !draft.trim() || !running}
+              disabled={!canSendImmediate}
               className="rounded bg-red-700 px-4 py-1.5 text-sm font-medium text-white hover:bg-red-600 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
-              title="現ターンを中止 → このメッセージ込みで次ターンを即起動"
+              title={
+                running
+                  ? '現ターンを中止して、このメッセージ込みで次ターンを即起動'
+                  : 'このメッセージを保存して runner を開始'
+              }
             >
-              ⚡ 即時反映
+              {immediateButtonLabel}
             </button>
             <span className="ml-auto text-xs text-zinc-500">
               {userMessages.filter((m) => !m.consumed_at_turn).length} 件未読 ・
@@ -623,10 +632,13 @@ export default function GoalDetail(): JSX.Element {
                         ? 'bg-purple-900/50 text-purple-200'
                         : entry.kind === 'judge'
                           ? 'bg-sky-900/50 text-sky-200'
-                          : 'bg-zinc-800 text-zinc-300'
+                          : entry.kind === 'block-judge'
+                            ? 'bg-rose-900/50 text-rose-200'
+                            : 'bg-zinc-800 text-zinc-300'
                     }`}
                   >
-                    {entry.kind}
+                    {/* 'block-judge' は w-16 (64px) に収まらないので bjudge と表記 */}
+                    {entry.kind === 'block-judge' ? 'bjudge' : entry.kind}
                   </span>
                   <span className="font-mono text-zinc-200">{entry.workId}</span>
                   <span

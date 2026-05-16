@@ -36,7 +36,7 @@ codex exec --help
 ## 初回セットアップ
 
 ```bash
-cd /Users/yuyafujita/Projects/Claude-goal/app
+cd /Users/yuyafujita/Projects/codex-goal/app
 npm install
 ```
 

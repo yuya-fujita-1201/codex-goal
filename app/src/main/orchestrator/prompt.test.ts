@@ -4,6 +4,8 @@ import {
   __test,
   DIGEST_END_SENTINEL,
   detectRateLimit,
+  extractBlockJudgeReason,
+  extractBlockJudgeVerdict,
   extractBlockSummary,
   extractCheckerResult,
   extractCompressedDigest,
@@ -427,6 +429,10 @@ describe('detectRateLimit', () => {
     expect(detectRateLimit('You are rate limited; window will reset soon.')).not.toBeNull()
   })
 
+  it('正常系: "rate limit reached" を検出する', () => {
+    expect(detectRateLimit('Codex error: rate limit reached. Try again later.')).not.toBeNull()
+  })
+
   it('正常系: "quota exceeded" を検出する', () => {
     expect(detectRateLimit('quota exceeded for this organization')).not.toBeNull()
   })
@@ -606,12 +612,91 @@ describe('extractPlan', () => {
 
 describe('buildPlanBanner (turn-001 only)', () => {
   it('計画立案フェーズの宣言と <plan> タグの出力指示を含む', () => {
-    const banner = __test.buildPlanBanner()
+    const banner = __test.buildPlanBanner('/tmp/ws')
     expect(banner).toContain('計画立案ターン')
     expect(banner).toContain('実装を一切行わず')
     expect(banner).toContain('<plan>')
     expect(banner).toContain('</plan>')
     // 達成宣言の禁止が明示されていること
     expect(banner).toContain('<goal-status>achieved</goal-status>')
+  })
+
+  it('成果物配置先をワークスペース配下に限定する禁止条項を含む', () => {
+    const banner = __test.buildPlanBanner('/Users/x/projects/my-ws')
+    expect(banner).toContain('/Users/x/projects/my-ws')
+    expect(banner).toMatch(/ワークスペース.*配下に限る/)
+    expect(banner).toContain('他プロジェクト')
+  })
+})
+
+describe('extractBlockJudgeVerdict', () => {
+  it('continue verdict を返す', () => {
+    const stdout = [
+      '前文...',
+      '<block-judge-verdict>continue</block-judge-verdict>',
+      ''
+    ].join('\n')
+    expect(extractBlockJudgeVerdict(stdout)).toBe('continue')
+  })
+
+  it('should_stop verdict を返す', () => {
+    const stdout = '<block-judge-verdict>should_stop</block-judge-verdict>'
+    expect(extractBlockJudgeVerdict(stdout)).toBe('should_stop')
+  })
+
+  it('goal_drift verdict を返す', () => {
+    const stdout = '<block-judge-verdict>goal_drift</block-judge-verdict>'
+    expect(extractBlockJudgeVerdict(stdout)).toBe('goal_drift')
+  })
+
+  it('タグ周辺の空白を許容する', () => {
+    const stdout = '<block-judge-verdict>   continue   </block-judge-verdict>'
+    expect(extractBlockJudgeVerdict(stdout)).toBe('continue')
+  })
+
+  it('タグが無ければ null を返す', () => {
+    expect(extractBlockJudgeVerdict('普通の本文だけ。')).toBeNull()
+  })
+
+  it('不正な verdict 値はマッチさせず null を返す', () => {
+    const stdout = '<block-judge-verdict>maybe</block-judge-verdict>'
+    expect(extractBlockJudgeVerdict(stdout)).toBeNull()
+  })
+
+  it('複数タグが出力された場合は最後のものを採用する (last-match)', () => {
+    // worker が prompt 内の例示タグを途中で吐いてから本物を最後に書くケース。
+    // last-match を採用しているので、最終的に確定した verdict が拾える。
+    const stdout = [
+      '例示: <block-judge-verdict>continue</block-judge-verdict>',
+      '...判断中...',
+      '<block-judge-verdict>should_stop</block-judge-verdict>'
+    ].join('\n')
+    expect(extractBlockJudgeVerdict(stdout)).toBe('should_stop')
+  })
+})
+
+describe('extractBlockJudgeReason', () => {
+  it('reason 本文を trim して返す', () => {
+    const stdout = [
+      '<block-judge-reason>',
+      'M1〜M3 すべて完了済み。',
+      'continue する意義が薄い。',
+      '</block-judge-reason>'
+    ].join('\n')
+    expect(extractBlockJudgeReason(stdout)).toBe(
+      'M1〜M3 すべて完了済み。\ncontinue する意義が薄い。'
+    )
+  })
+
+  it('タグが無ければ空文字を返す', () => {
+    expect(extractBlockJudgeReason('reason は無い')).toBe('')
+  })
+
+  it('複数 reason が出力された場合は最後のものを採用する (last-match)', () => {
+    const stdout = [
+      '<block-judge-reason>初稿の理由</block-judge-reason>',
+      '<block-judge-reason>最終的な理由</block-judge-reason>'
+    ].join('\n')
+    expect(extractBlockJudgeReason(stdout)).toBe('最終的な理由')
   })
 })

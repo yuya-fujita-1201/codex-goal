@@ -1,6 +1,6 @@
 {
   "name": "codex-goal",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Local desktop app that runs Codex CLI in successive non-interactive turns until a goal is achieved.",
   "main": "out/main/index.js",
   "author": "Yuya Fujita",

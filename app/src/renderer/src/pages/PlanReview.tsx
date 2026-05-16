@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import type { GoalSummary, PlanChatMessage, PlanEvent } from '@shared/types'
+import { findExternalAbsolutePaths } from '@shared/planValidation'
 import ChatBubble from '../components/ChatBubble'
 
 // Renderer-side chat entry. We store the canonical history of finalized turns
@@ -231,6 +232,31 @@ export default function PlanReview(): JSX.Element {
 
   async function handleApprove(): Promise<void> {
     if (!goalId || !pendingPlan || approving) return
+    // Safety net: warn if the plan points new files at a different workspace.
+    // The worker will literally follow the plan's absolute paths and produce
+    // output outside the goal's workspace, which is confusing and hard to
+    // unwind. The prompt-level rule (planSession seed message) is the
+    // primary defense; this is the last-line user confirmation.
+    const ws = goalRef.current?.state.workspace_path ?? goal?.state.workspace_path ?? ''
+    const externals = findExternalAbsolutePaths(pendingPlan, ws)
+    if (externals.length > 0) {
+      const list = externals.map((p) => `  • ${p}`).join('\n')
+      const ok = window.confirm(
+        [
+          '⚠️ プラン内にワークスペース外の絶対パスが含まれています。',
+          '',
+          `ワークスペース: ${ws}`,
+          '',
+          '検出された外部パス（成果物の保存先になる可能性があります）:',
+          list,
+          '',
+          'この plan を承認すると、worker は plan に書かれた絶対パスに沿って',
+          'ワークスペース外にファイルを作成する可能性があります。',
+          'プランを修正せず、このまま承認しますか？'
+        ].join('\n')
+      )
+      if (!ok) return
+    }
     setApproving(true)
     setErrorBanner(null)
     try {
@@ -384,6 +410,33 @@ export default function PlanReview(): JSX.Element {
               {approving ? '承認中…' : '✅ 承認して開始'}
             </button>
           </div>
+          {(() => {
+            const ws = goal?.state.workspace_path ?? ''
+            const externals = findExternalAbsolutePaths(pendingPlan, ws)
+            if (externals.length === 0) return null
+            return (
+              <div className="mb-2 rounded border border-amber-600/60 bg-amber-950/30 p-2 text-xs text-amber-200">
+                <div className="mb-1 font-semibold">
+                  ⚠️ ワークスペース外の絶対パスが含まれています
+                </div>
+                <div className="mb-1 text-amber-300/80">
+                  ワークスペース: <code className="text-amber-100">{ws}</code>
+                </div>
+                <div className="mb-1">検出された外部パス:</div>
+                <ul className="ml-4 list-disc">
+                  {externals.map((p) => (
+                    <li key={p}>
+                      <code className="text-amber-100">{p}</code>
+                    </li>
+                  ))}
+                </ul>
+                <div className="mt-1 text-amber-300/80">
+                  このまま承認すると、worker が plan の絶対パスに沿ってワークスペース外にファイルを作成する可能性があります。
+                  必要なら Codex にプランを修正させてから承認してください。
+                </div>
+              </div>
+            )
+          })()}
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-sky-900/50 bg-bg-secondary/60 p-2 text-xs text-zinc-200">
             {pendingPlan}
           </pre>

@@ -81,7 +81,7 @@ export async function start(goalId: string, objective: string): Promise<PlanSess
   sessions.set(goalId, sess)
   emit({ type: 'session-started', goalId, sessionId: null, ts: isoNow() })
 
-  void runCodexPlanTurn(sess, buildSeedMessage(objective)).catch((err) => {
+  void runCodexPlanTurn(sess, buildSeedMessage(objective, sess.workspacePath)).catch((err) => {
     handleTurnError(sess, err)
   })
 
@@ -149,8 +149,8 @@ function emit(event: PlanEvent): void {
   }
 }
 
-function buildSeedMessage(objective: string): string {
-  return [
+function buildSeedMessage(objective: string, workspacePath?: string): string {
+  const lines = [
     'You are Codex running in an interactive planning phase for Codex Goal.',
     '',
     'Important constraints:',
@@ -160,7 +160,32 @@ function buildSeedMessage(objective: string): string {
     '- Continue the discussion naturally across turns.',
     '- When you have enough information, output the final plan inside a single <plan>...</plan> block.',
     '- The plan should be concrete enough for a later autonomous Codex runner to execute.',
-    '- Write user-facing text in Japanese unless the user explicitly asks otherwise.',
+    '- Write user-facing text in Japanese unless the user explicitly asks otherwise.'
+  ]
+  // codex プロセスはこの workspacePath を cwd として起動されているので、
+  // 通常はツールがそのまま正しいルートを見る。ただし会話初期で「ここはどこ？」
+  // と Codex 自身が言うケースを潰し、加えて成果物配置先がワークスペース外に
+  // ずれる事故を防ぐため、プロンプトでも明示する。
+  if (workspacePath && workspacePath.length > 0) {
+    lines.push(
+      '',
+      `Your current working directory (project root) is: ${workspacePath}`,
+      'Treat this path as the project the user wants to plan for.',
+      '',
+      '## Hard rule for the plan output (absolute)',
+      '',
+      `All deliverables produced by following this plan MUST be placed under \`${workspacePath}\`.`,
+      'When the plan describes a directory layout or file path, write those paths',
+      `as relative to \`${workspacePath}\`, or as absolute paths whose prefix is exactly \`${workspacePath}\`.`,
+      'NEVER point the plan at another project directory (e.g. a different repo under',
+      '`~/Projects/`, another `docs/` folder, etc.) as the destination for new files.',
+      'Even if the user goal text mentions another product/project name as context',
+      "(e.g. \"Salesforce\", \"frontend\"), that's contextual information — not a save",
+      'location. Always anchor the save location to the workspace path above.',
+      'Reading from external directories is allowed; writing to them is forbidden.'
+    )
+  }
+  lines.push(
     '',
     'Required final plan format:',
     '<plan>',
@@ -183,7 +208,8 @@ function buildSeedMessage(objective: string): string {
     '<goal>',
     objective.trim(),
     '</goal>'
-  ].join('\n')
+  )
+  return lines.join('\n')
 }
 
 function buildFollowupMessage(text: string): string {
@@ -234,12 +260,20 @@ async function runCodexPlanTurn(sess: InternalSession, promptText: string): Prom
   child.stdout.on('data', (chunk: string) => handleStdoutChunk(sess, chunk))
 
   let stderrText = ''
+  let stdinError: Error | null = null
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', (chunk: string) => {
     stderrText += chunk
   })
 
-  child.stdin.end(promptText)
+  child.stdin.on('error', (err) => {
+    stdinError = err instanceof Error ? err : new Error(String(err))
+  })
+  try {
+    child.stdin.end(promptText)
+  } catch (err) {
+    stdinError = err instanceof Error ? err : new Error(String(err))
+  }
 
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     child.on('close', (code) => resolve(code))
@@ -247,6 +281,10 @@ async function runCodexPlanTurn(sess: InternalSession, promptText: string): Prom
   })
 
   if (sess.currentProc === child) sess.currentProc = null
+
+  if (stdinError && !sess.exitReason) {
+    throw new Error(`codex plan stdin error: ${stdinError.message}`)
+  }
 
   if (exitCode !== 0 && !sess.exitReason) {
     throw new Error(stderrText.trim() || `codex plan turn failed with exit code ${exitCode ?? '?'}`)

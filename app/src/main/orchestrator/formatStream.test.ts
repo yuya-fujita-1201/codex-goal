@@ -19,37 +19,6 @@ describe('formatStreamLine — system events', () => {
   })
 })
 
-describe('formatStreamLine — Codex exec JSON events', () => {
-  it('正常系: thread.started は thread id 付きで開始バナーを返す', () => {
-    const line = JSON.stringify({ type: 'thread.started', thread_id: 'thread-1' })
-    expect(formatStreamLine(line)).toBe('[thread start — id=thread-1]\n')
-  })
-
-  it('正常系: turn.started は開始行を返す', () => {
-    const line = JSON.stringify({ type: 'turn.started' })
-    expect(formatStreamLine(line)).toBe('[turn started]\n')
-  })
-
-  it('正常系: item.completed agent_message は text をそのまま返す', () => {
-    const text = '<digest-update>\n## A\n</digest-update>'
-    const line = JSON.stringify({
-      type: 'item.completed',
-      item: { type: 'agent_message', text }
-    })
-    expect(formatStreamLine(line)).toBe(`${text}\n`)
-  })
-
-  it('正常系: turn.completed は usage を整形する', () => {
-    const line = JSON.stringify({
-      type: 'turn.completed',
-      usage: { input_tokens: 10, cached_input_tokens: 4, output_tokens: 2 }
-    })
-    expect(formatStreamLine(line)).toBe(
-      '\n=== turn completed input_tokens=10 cached=4 output_tokens=2 ===\n'
-    )
-  })
-})
-
 describe('formatStreamLine — assistant events', () => {
   it('正常系: text content をそのまま出力し、末尾に改行を補う', () => {
     const line = JSON.stringify({
